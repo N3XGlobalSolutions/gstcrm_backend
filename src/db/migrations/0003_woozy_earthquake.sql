@@ -1,4 +1,4 @@
-ALTER TABLE "entry_groups" DROP CONSTRAINT "entry_groups_entry_no_unique";--> statement-breakpoint
+ALTER TABLE "entry_groups" DROP CONSTRAINT IF EXISTS "entry_groups_entry_no_unique";--> statement-breakpoint
 ALTER TABLE "entry_groups" ALTER COLUMN "entry_no" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "company_details" ADD COLUMN "business_name" varchar(300);--> statement-breakpoint
 ALTER TABLE "company_details" ADD COLUMN "address_line1" text;--> statement-breakpoint
