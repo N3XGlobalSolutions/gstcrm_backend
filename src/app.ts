@@ -23,7 +23,14 @@ app.set("trust proxy", 1);
 app.use(helmet());
 
 // ─── 2. CORS ──────────────────────────────────────────────────────────────────
-const allowedOrigins = [env.FRONTEND_URL, "http://localhost:5173", "http://localhost:5174"];
+const allowedOrigins = [
+  env.FRONTEND_URL,
+  "https://aarsanjewels.cloud",
+  "https://www.aarsanjewels.cloud",
+  "https://goldcrmfrontend.pages.dev",
+  "http://localhost:5173",
+  "http://localhost:5174"
+];
 
 app.use(
   cors({
@@ -33,6 +40,11 @@ app.use(
       
       // In development, dynamically allow any localhost origin
       if (env.NODE_ENV === "development" && (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:"))) {
+        return callback(null, true);
+      }
+
+      // Dynamically allow any Cloudflare Pages preview/branch deployments
+      if (origin.endsWith(".pages.dev")) {
         return callback(null, true);
       }
       
