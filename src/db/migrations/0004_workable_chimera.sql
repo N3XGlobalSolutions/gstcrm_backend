@@ -1,4 +1,4 @@
-CREATE TABLE "tax_master" (
+CREATE TABLE IF NOT EXISTS "tax_master" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"entry_no" integer NOT NULL,
 	"category" varchar(50) NOT NULL,
