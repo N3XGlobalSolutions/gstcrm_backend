@@ -26,5 +26,5 @@ ENV PORT=3001
 
 EXPOSE 3001
 
-# Run database migrations and then start the backend server
-CMD ["sh", "-c", "npm run db:migrate && npm start"]
+# Run the backend using the start script (which executes via tsx)
+CMD ["npm", "start"]
