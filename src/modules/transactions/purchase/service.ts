@@ -1,0 +1,310 @@
+import { AppError } from "@/types/errors";
+import { createEntryGroup } from "@/lib/entryBuilder";
+import { reverseEntryGroup } from "@/lib/reversal";
+import { calcPure, toQuantityString, toDecimal } from "@/lib/decimal";
+import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
+import { listTransactions, getTransactionById, generateBillNo } from "@/lib/transactionQueries";
+import { db } from "@/db";
+import { entries as entriesTable, items as itemsTable, gstPurchaseHistory, accounts, entryGroups } from "@/db/schema";
+import { inArray, eq, desc, count } from "drizzle-orm";
+import { getAggregateBalances } from "@/lib/balance";
+import type { z } from "zod";
+import type {
+  ListTxSchema,
+  GetByIdSchema,
+  CreatePurchaseSchema,
+  UpdatePurchaseSchema,
+  DeleteTxSchema,
+} from "./schema";
+
+export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
+  const result = await listTransactions("PURCHASE", input);
+  
+  if (result.data.length === 0) return result;
+  
+  const groupIds = result.data.map(d => d.group.id);
+  const txEntries = await db
+    .select({
+      entry: entriesTable,
+      item_name: itemsTable.name,
+      item_type: itemsTable.type,
+    })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(inArray(entriesTable.group_id, groupIds));
+
+  // Check which purchases have been converted to GST
+  const convertedGroups = await db
+    .select({ purchase_id: gstPurchaseHistory.purchase_id })
+    .from(gstPurchaseHistory)
+    .where(inArray(gstPurchaseHistory.purchase_id, groupIds));
+
+  const convertedSet = new Set(convertedGroups.map((c) => c.purchase_id));
+
+  const enrichedData = result.data.map((d) => {
+    const groupEntries = txEntries.filter(e => e.entry.group_id === d.group.id);
+    return {
+      ...d,
+      entries: groupEntries,
+      isConverted: convertedSet.has(d.group.id),
+    };
+  });
+
+  const finalEnrichedData = await Promise.all(
+    enrichedData.map(async (d) => {
+      // Find the historical balance up to this group's exact time, strictly excluding the group itself!
+      const opening = await getAggregateBalances(
+        d.group.account_id,
+        new Date(d.group.created_at),
+        d.group.id
+      );
+
+      return {
+        ...d,
+        openingPure: opening.totalPure.toFixed(4),
+        openingCash: opening.totalCash.toFixed(2),
+        isConverted: d.isConverted,
+      };
+    })
+  );
+
+  return { ...result, data: finalEnrichedData };
+}
+
+export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
+  const tx = await getTransactionById(input.id);
+  if (!tx) throw new AppError("NOT_FOUND", "Purchase not found");
+
+  // Separate entries by item type from the join
+  const goldEntries = tx.entries.filter((e) => e.item_type === "GOLD");
+  const ornamentEntries = tx.entries.filter((e) => e.item_type === "ORNAMENT");
+  const moneyEntries = tx.entries.filter((e) => e.item_type === "MONEY");
+
+  return { ...tx, goldEntries, ornamentEntries, moneyEntries };
+}
+
+export async function createPurchase(input: z.infer<typeof CreatePurchaseSchema>) {
+  const allItems = [...input.gold_items, ...input.ornament_items];
+  if (allItems.length === 0) {
+    throw new AppError("VALIDATION_ERROR", "At least one item is required");
+  }
+
+  // Step 5 — Bill number per supplier
+  const bill_no = await generateBillNo(db, input.account_id, "PURCHASE");
+
+  // Step 6 — Build entries (from: supplier → SHOP for goods; SHOP → supplier for cash)
+  const entryInputs = [
+    ...input.gold_items.map((item) => ({
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      itemId: item.item_id,
+      quantity: item.quantity,
+      purity: item.purity,
+    })),
+    ...input.ornament_items.map((item) => ({
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      itemId: item.item_id,
+      quantity: item.quantity,
+      purity: item.purity,
+    })),
+    // Money paid to supplier (shop pays out)
+    ...(toDecimal(input.bank_amount).gt(0)
+      ? [
+          {
+            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            toAccountId: input.account_id,
+            itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+            quantity: input.bank_amount,
+            remarks: input.bank_details,
+          },
+        ]
+      : []),
+  ];
+
+  const { group, entries } = await createEntryGroup({
+    type: "PURCHASE",
+    accountId: input.account_id,
+    date: input.date,
+    billNo: bill_no,
+    ratePerGram: input.rate_per_gram,
+    remarks: input.remarks,
+    entries: entryInputs,
+  });
+
+  return { group, entries };
+}
+
+export async function updatePurchase(input: z.infer<typeof UpdatePurchaseSchema>) {
+  // Reverse the original, then create a new one
+  await reverseEntryGroup(input.id);
+  const { id: _removed, ...createInput } = input;
+  return createPurchase(createInput);
+}
+
+export async function deletePurchase(input: z.infer<typeof DeleteTxSchema>) {
+  const tx = await getTransactionById(input.id);
+  if (!tx) throw new AppError("NOT_FOUND", "Purchase not found");
+  await reverseEntryGroup(input.id);
+  return { success: true };
+}
+
+export async function updateGSTPurchaseConversion(
+  input: { id: string; gst_amount: string; tds_amount: string; tcs_amount: string }
+) {
+  return db.transaction(async (tx) => {
+    // 1. Fetch original group
+    const [originalGroup] = await tx
+      .select()
+      .from(entryGroups)
+      .where(eq(entryGroups.id, input.id))
+      .limit(1);
+
+    if (!originalGroup) throw new AppError("NOT_FOUND", "Purchase not found");
+
+    // 2. Fetch original entries (and item details)
+    const originalEntries = await tx
+      .select({
+        entry: entriesTable,
+        item_name: itemsTable.name,
+        item_type: itemsTable.type,
+      })
+      .from(entriesTable)
+      .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+      .where(eq(entriesTable.group_id, input.id));
+
+    // Calculate display fields for flat table copy
+    const itemEntries = originalEntries.filter((e) => e.item_type === "GOLD" || e.item_type === "ORNAMENT");
+    const moneyEntries = originalEntries.filter((e) => e.item_type === "MONEY");
+
+    const itemNames = Array.from(
+      new Set(itemEntries.map((e) => e.item_name).filter(Boolean))
+    ).join(", ");
+
+    const itemTypeLabel = (() => {
+      const types = new Set(itemEntries.map((e) => e.item_type));
+      if (types.size === 0) return "-";
+      if (types.size > 1) return "Mixed";
+      return types.has("GOLD") ? "Gold" : "Ornament";
+    })();
+
+    const rate = parseFloat(originalGroup.rate_per_gram || "0");
+    const currentPure = itemEntries.reduce(
+      (s: number, e: any) => s + parseFloat(e.entry.pure_quantity || "0"),
+      0,
+    );
+    const currentCash = currentPure * rate;
+    const bankPaidAmount = moneyEntries.reduce(
+      (s: number, e: any) => s + parseFloat(e.entry.quantity || "0"),
+      0,
+    );
+
+    // Fetch opening balance up to this group (exclusive of this group)
+    const opening = await getAggregateBalances(
+      originalGroup.account_id,
+      new Date(originalGroup.created_at),
+      originalGroup.id
+    );
+    const rawOpeningPure = parseFloat(opening.totalPure.toString() || "0");
+    const rawOpeningCash = parseFloat(opening.totalCash.toString() || "0");
+
+    const priorPureGiven = -rawOpeningPure;
+    const priorBalancePure = rate > 0
+      ? priorPureGiven - rawOpeningCash / rate
+      : priorPureGiven;
+    
+    const balancePure = priorBalancePure + currentPure - (rate > 0 ? bankPaidAmount / rate : 0);
+    const balanceCash = balancePure * rate;
+
+    // 3. Create the flat copy in the gst_purchase_history table
+    const [inserted] = await tx
+      .insert(gstPurchaseHistory)
+      .values({
+        purchase_id: originalGroup.id,
+        entry_no: originalGroup.entry_no?.toString() || "-",
+        bill_no: originalGroup.bill_no?.toString() || "-",
+        date: originalGroup.date ? new Date(originalGroup.date) : new Date(),
+        account_id: originalGroup.account_id,
+        pure: currentPure.toString(),
+        cash: currentCash.toString(),
+        gst_amount: input.gst_amount,
+        tds_amount: input.tds_amount,
+        tcs_amount: input.tcs_amount,
+        type: "PURCHASE",
+        rate: rate.toString(),
+        item_type: itemNames ? `${itemTypeLabel} (${itemNames})` : itemTypeLabel,
+        bal_pure: balancePure.toString(),
+        bal_cash: balanceCash.toString(),
+        bank_paid: bankPaidAmount.toString(),
+        bank_receive: "0",
+        cash_paid: "0",
+      })
+      .returning();
+
+    if (!inserted) throw new AppError("INTERNAL_ERROR", "Failed to create GST Purchase copy");
+
+    return inserted;
+  });
+}
+
+export async function listGSTPurchaseHistory(input: z.infer<typeof ListTxSchema>) {
+  const offset = (input.page - 1) * input.limit;
+
+  const [data, [countRow]] = await Promise.all([
+    db
+      .select({
+        id: gstPurchaseHistory.id,
+        purchase_id: gstPurchaseHistory.purchase_id,
+        entryNo: gstPurchaseHistory.entry_no,
+        billNo: gstPurchaseHistory.bill_no,
+        date: gstPurchaseHistory.date,
+        account_id: gstPurchaseHistory.account_id,
+        pure: gstPurchaseHistory.pure,
+        cash: gstPurchaseHistory.cash,
+        gstAmount: gstPurchaseHistory.gst_amount,
+        tdsAmount: gstPurchaseHistory.tds_amount,
+        tcsAmount: gstPurchaseHistory.tcs_amount,
+        type: gstPurchaseHistory.type,
+        rate: gstPurchaseHistory.rate,
+        itemType: gstPurchaseHistory.item_type,
+        balPure: gstPurchaseHistory.bal_pure,
+        balCash: gstPurchaseHistory.bal_cash,
+        bankPaid: gstPurchaseHistory.bank_paid,
+        bankReceive: gstPurchaseHistory.bank_receive,
+        cashPaid: gstPurchaseHistory.cash_paid,
+        account_name: accounts.name,
+      })
+      .from(gstPurchaseHistory)
+      .leftJoin(accounts, eq(gstPurchaseHistory.account_id, accounts.id))
+      .orderBy(desc(gstPurchaseHistory.created_at))
+      .limit(input.limit)
+      .offset(offset),
+    db.select({ total: count() }).from(gstPurchaseHistory),
+  ]);
+
+  const mappedData = data.map((row) => ({
+    id: row.id,
+    purchaseId: row.purchase_id,
+    accountId: row.account_id,
+    entryNo: row.entryNo,
+    date: row.date ? new Date(row.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-",
+    billNo: row.billNo,
+    name: row.account_name || "-",
+    pure: parseFloat(row.pure) > 0 ? parseFloat(row.pure).toFixed(3) : "-",
+    cash: parseFloat(row.cash) > 0 ? parseFloat(row.cash).toFixed(2) : "-",
+    type: row.type,
+    rate: parseFloat(row.rate) > 0 ? parseFloat(row.rate).toFixed(2) : "-",
+    itemType: row.itemType,
+    balPure: parseFloat(row.balPure).toFixed(3),
+    balCash: parseFloat(row.balCash).toFixed(2),
+    bankPaid: parseFloat(row.bankPaid || "0") > 0 ? parseFloat(row.bankPaid || "0").toFixed(2) : "-",
+    bankReceive: parseFloat(row.bankReceive || "0") > 0 ? parseFloat(row.bankReceive || "0").toFixed(2) : "-",
+    cashPaid: parseFloat(row.cashPaid || "0") > 0 ? parseFloat(row.cashPaid || "0").toFixed(2) : "-",
+    gstAmount: parseFloat(row.gstAmount) > 0 ? parseFloat(row.gstAmount).toFixed(2) : "-",
+    tdsAmount: parseFloat(row.tdsAmount || "0") > 0 ? parseFloat(row.tdsAmount || "0").toFixed(2) : "-",
+    tcsAmount: parseFloat(row.tcsAmount || "0") > 0 ? parseFloat(row.tcsAmount || "0").toFixed(2) : "-",
+  }));
+
+  return { data: mappedData, total: countRow?.total ?? 0 };
+}
+

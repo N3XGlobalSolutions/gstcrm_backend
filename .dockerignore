@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+bun.lock
+package-lock.json
+dist
+.env
+.git
+.gitignore
+.agents
+.claude
+.goose
+*.md
