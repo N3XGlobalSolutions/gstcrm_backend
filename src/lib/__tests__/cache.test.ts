@@ -86,10 +86,16 @@ describe("Caching System", () => {
 
       unsafe(query: string, params: any[] = [], options: any = {}) {
         this.queriesExecuted.push(query);
-        if (query.includes("items")) {
-          return Promise.resolve([{ id: "item-1" }]);
-        }
-        return Promise.resolve([{ id: "acc-1" }]);
+        const data = query.includes("items") ? [{ id: "item-1" }] : [{ id: "acc-1" }];
+        
+        const pendingQuery: any = Promise.resolve(data);
+        pendingQuery.values = () => {
+          const arrayModeData = data.map(obj => Object.values(obj));
+          const pqValues: any = Promise.resolve(arrayModeData);
+          pqValues.values = pendingQuery.values;
+          return pqValues;
+        };
+        return pendingQuery;
       }
 
       async begin(callback: (tx: any) => Promise<any>) {
@@ -120,6 +126,21 @@ describe("Caching System", () => {
       const res3 = await proxy.unsafe('SELECT * FROM "items" WHERE id = $1', [1]);
       expect(res3).toEqual([{ id: "item-1" }]);
       expect(mock.queriesExecuted).toHaveLength(3); // Query is executed on DB again
+    });
+
+    it("supports method chaining with .values()", async () => {
+      const mock = new MockClient();
+      const proxy = wrapSql(mock);
+
+      // 1. Query with .values() (miss)
+      const res1 = await proxy.unsafe('SELECT * FROM "items" WHERE id = $1', [1]).values();
+      expect(res1).toEqual([["item-1"]]);
+      expect(mock.queriesExecuted).toHaveLength(1);
+
+      // 2. Query with .values() (hit)
+      const res2 = await proxy.unsafe('SELECT * FROM "items" WHERE id = $1', [1]).values();
+      expect(res2).toEqual([["item-1"]]);
+      expect(mock.queriesExecuted).toHaveLength(1);
     });
 
     it("bypasses cache read in transactions and invalidates tags upon commit", async () => {

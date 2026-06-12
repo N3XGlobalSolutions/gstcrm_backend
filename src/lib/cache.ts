@@ -118,6 +118,75 @@ export function isReadQuery(sql: string): boolean {
 }
 
 /**
+ * Lazily wraps a postgres-js pending query to support method chaining (e.g., `.values()`, `.cursor()`)
+ * and checks the cache only when the query is actually executed (awaited).
+ */
+function createLazyPendingQuery(
+  target: any,
+  sql: string,
+  params: any[],
+  isArrayMode: boolean,
+  options: any
+): any {
+  const lazyQuery: any = {
+    then(resolve: any, reject: any) {
+      const cacheKey = JSON.stringify({ sql, params, isArrayMode });
+      const cached = memoryCache.get(cacheKey);
+
+      if (cached !== null) {
+        return Promise.resolve(cached).then(resolve, reject);
+      }
+
+      // Cache miss: execute the query on the database
+      let pq = target.unsafe(sql, params, options);
+      if (isArrayMode) {
+        pq = pq.values();
+      }
+
+      return pq.then(
+        (result: any) => {
+          const tables = extractTables(sql);
+          memoryCache.set(cacheKey, result, tables);
+          if (resolve) resolve(result);
+          return result;
+        },
+        (err: any) => {
+          if (reject) reject(err);
+          throw err;
+        }
+      );
+    },
+
+    catch(reject: any) {
+      return this.then(undefined, reject);
+    },
+
+    finally(callback: any) {
+      let pq = target.unsafe(sql, params, options);
+      if (isArrayMode) {
+        pq = pq.values();
+      }
+      return pq.finally(callback);
+    },
+
+    values() {
+      if (isArrayMode) return this;
+      return createLazyPendingQuery(target, sql, params, true, options);
+    },
+
+    cursor() {
+      let pq = target.unsafe(sql, params, options);
+      if (isArrayMode) {
+        pq = pq.values();
+      }
+      return pq.cursor();
+    }
+  };
+
+  return lazyQuery;
+}
+
+/**
  * Wraps a postgres connection or transaction client with caching logic.
  */
 export function wrapSql(client: any, inTx = false, txTables = new Set<string>()): any {
@@ -144,17 +213,8 @@ export function wrapSql(client: any, inTx = false, txTables = new Set<string>())
             return target.unsafe(query, params, options);
           }
 
-          const cacheKey = JSON.stringify({ query, params });
-          const cached = memoryCache.get(cacheKey);
-          if (cached !== null) {
-            return Promise.resolve(cached);
-          }
-
-          const pendingQuery = target.unsafe(query, params, options);
-          return pendingQuery.then((result: any) => {
-            memoryCache.set(cacheKey, result, tables);
-            return result;
-          });
+          // Return a lazy pending query to intercept execution and support method chaining
+          return createLazyPendingQuery(target, query, params, false, options);
         };
       }
 
