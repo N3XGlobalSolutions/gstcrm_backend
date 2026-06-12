@@ -71,7 +71,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRouter);
 
 // ─── 5. Health check (no auth required) ──────────────────────────────────────
-app.get("/health", (_req, res) => {
+app.get("/api/health", (_req, res) => {
   try {
     const processUptime = process.uptime();
     const osUptime = os.uptime();
@@ -112,7 +112,7 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── 5.1 Database Health check (no auth required) ───────────────────────────
-app.get("/health3", async (_req, res) => {
+app.get("/api/health3", async (_req, res) => {
   try {
     await db.execute(sql`SELECT 1`);
     res.status(200).json({
