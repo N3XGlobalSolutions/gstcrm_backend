@@ -291,19 +291,37 @@ const backupRouter = router({
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const filename = `goldcrm_backup_${timestamp}.sql`;
+      const filename = `goldcrm_backup_${timestamp}.sql.enc`;
+
+      // Encrypt the SQL dump
+      const password = env.BACKUP_ENCRYPTION_PASSWORD;
+      if (!password) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "BACKUP_ENCRYPTION_PASSWORD is not set in the environment.",
+        });
+      }
+
+      const salt = crypto.randomBytes(16);
+      const iv = crypto.randomBytes(16);
+      const key = crypto.scryptSync(password, salt, 32);
+      const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
+      let encryptedHex = cipher.update(sqlDump, "utf8", "hex");
+      encryptedHex += cipher.final("hex");
+      
+      const payload = `${salt.toString("hex")}:${iv.toString("hex")}:${encryptedHex}`;
 
       // Save a copy to the server's disk
       try {
         const dir = join(process.cwd(), "backups");
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, filename), sqlDump);
+        writeFileSync(join(dir, filename), payload);
       } catch(e) {
         console.error("Failed to write backup to disk", e);
       }
 
-      // Return the unencrypted dump payload
-      return { success: true, filename, data: sqlDump };
+      // Return the encrypted dump payload
+      return { success: true, filename, data: payload };
     }),
 });
 

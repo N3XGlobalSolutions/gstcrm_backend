@@ -10,6 +10,9 @@ import { appRouter } from "@/app.router";
 import authRouter from "@/modules/auth/router";
 import { globalErrorHandler } from "@/middlewares/errorHandler";
 import { env } from "@/config/env";
+import os from "os";
+import { db } from "@/db";
+import { sql } from "drizzle-orm";
 
 const app = express();
 
@@ -69,7 +72,62 @@ app.use("/api/auth", authRouter);
 
 // ─── 5. Health check (no auth required) ──────────────────────────────────────
 app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+  try {
+    const processUptime = process.uptime();
+    const osUptime = os.uptime();
+    const freemem = os.freemem();
+    const totalmem = os.totalmem();
+    const memoryUsage = process.memoryUsage();
+    const loadavg = os.loadavg();
+    
+    res.status(200).json({
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      uptime: {
+        process: `${Math.floor(processUptime)}s`,
+        system: `${Math.floor(osUptime)}s`,
+      },
+      processMemory: {
+        rss: `${Math.round(memoryUsage.rss / 1024 / 1024)}MB`,
+        heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB`,
+        heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`,
+      },
+      systemMemory: {
+        free: `${Math.round(freemem / 1024 / 1024)}MB`,
+        total: `${Math.round(totalmem / 1024 / 1024)}MB`,
+        usagePercentage: `${Math.round(((totalmem - freemem) / totalmem) * 100)}%`,
+      },
+      cpu: {
+        loadAverage: loadavg,
+        cores: os.cpus().length,
+      }
+    });
+  } catch (error: any) {
+    console.error("Health check failed:", error);
+    res.status(500).json({
+      status: "unhealthy",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// ─── 5.1 Database Health check (no auth required) ───────────────────────────
+app.get("/health3", async (_req, res) => {
+  try {
+    await db.execute(sql`SELECT 1`);
+    res.status(200).json({
+      status: "healthy",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error("Database health check failed:", error);
+    res.status(500).json({
+      status: "unhealthy",
+      database: "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // ─── 6. tRPC handler at /api/trpc ─────────────────────────────────────────────
