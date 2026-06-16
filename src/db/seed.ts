@@ -113,28 +113,28 @@ async function seed() {
   const [existingAdmin] = await db
     .select({ id: appUsers.id })
     .from(appUsers)
-    .where(eq(appUsers.username, "admin"))
+    .where(eq(appUsers.username, "superadmin"))
     .limit(1);
 
   let adminUserId: string;
 
   if (!existingAdmin) {
-    const passwordHash = await bcrypt.hash("Admin@123", 12);
+    const passwordHash = await bcrypt.hash("Hello@2026", 12);
     const [inserted] = await db
       .insert(appUsers)
       .values({
         entry_no: 1,
-        username: "admin",
+        username: "superadmin",
         password_hash: passwordHash,
         user_group: "admin",
       })
       .returning({ id: appUsers.id });
 
     adminUserId = inserted!.id;
-    console.log("✅ Admin user created");
+    console.log("✅ Superadmin user created");
   } else {
     adminUserId = existingAdmin.id;
-    console.log("ℹ️  Admin user already exists");
+    console.log("ℹ️  Superadmin user already exists");
   }
 
   // ── 4. Admin form permissions ─────────────────────────────────────────────
