@@ -83,14 +83,14 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   return { ...tx, goldEntries, ornamentEntries, moneyEntries };
 }
 
-export async function createPurchase(input: z.infer<typeof CreatePurchaseSchema>) {
+export async function createPurchase(
+  input: z.infer<typeof CreatePurchaseSchema>,
+  options?: { existingBillNo?: number; existingEntryNo?: number }
+) {
   const allItems = [...input.gold_items, ...input.ornament_items];
   if (allItems.length === 0) {
     throw new AppError("VALIDATION_ERROR", "At least one item is required");
   }
-
-  // Step 5 — Bill number per supplier
-  const bill_no = await generateBillNo(db, input.account_id, "PURCHASE");
 
   // Step 6 — Build entries (from: supplier → SHOP for goods; SHOP → supplier for cash)
   const entryInputs = [
@@ -126,7 +126,8 @@ export async function createPurchase(input: z.infer<typeof CreatePurchaseSchema>
     type: "PURCHASE",
     accountId: input.account_id,
     date: input.date,
-    billNo: bill_no,
+    billNo: options?.existingBillNo,
+    entryNo: options?.existingEntryNo,
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     entries: entryInputs,
@@ -136,17 +137,31 @@ export async function createPurchase(input: z.infer<typeof CreatePurchaseSchema>
 }
 
 export async function updatePurchase(input: z.infer<typeof UpdatePurchaseSchema>) {
+  // Fetch original group to retrieve bill_no and entry_no
+  const [originalGroup] = await db
+    .select({
+      bill_no: entryGroups.bill_no,
+      entry_no: entryGroups.entry_no,
+    })
+    .from(entryGroups)
+    .where(eq(entryGroups.id, input.id))
+    .limit(1);
+
+  if (!originalGroup) {
+    throw new AppError("NOT_FOUND", "Purchase not found");
+  }
+
   // Reverse the original, then create a new one
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
-  return createPurchase(createInput);
+  return createPurchase(createInput, {
+    existingBillNo: originalGroup.bill_no ?? undefined,
+    existingEntryNo: originalGroup.entry_no ?? undefined,
+  });
 }
 
 export async function deletePurchase(input: z.infer<typeof DeleteTxSchema>) {
-  const tx = await getTransactionById(input.id);
-  if (!tx) throw new AppError("NOT_FOUND", "Purchase not found");
-  await reverseEntryGroup(input.id);
-  return { success: true };
+  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for purchases");
 }
 
 export async function updateGSTPurchaseConversion(

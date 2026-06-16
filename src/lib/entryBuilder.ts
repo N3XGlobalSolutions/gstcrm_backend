@@ -15,6 +15,7 @@ import {
   toAmountString,
 } from "./decimal";
 import { generateEntryGroupNo, generateLotId } from "./entryNoGenerator";
+import { generateBillNo } from "./transactionQueries";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ export interface CreateEntryGroupInput {
   type: EntryGroupType;
   accountId: string;
   date: string; // ISO YYYY-MM-DD
+  entryNo?: number;
   billNo?: number;
   ratePerGram?: string;
   remarks?: string;
@@ -74,9 +76,15 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?: Tx) {
   const run = async (tx: Tx) => {
     // Step 1 — Generate entry_no for the group (REVERSAL entries don't get a visible number)
-    const groupEntryNo = input.type !== "REVERSAL"
+    const groupEntryNo = input.entryNo ?? (input.type !== "REVERSAL"
       ? await generateEntryGroupNo(tx, input.type)
-      : undefined;
+      : undefined);
+
+    // Step 1.5 — Generate bill_no if not provided and not REVERSAL or OPENING
+    let groupBillNo = input.billNo;
+    if (groupBillNo === undefined && input.type !== "REVERSAL" && input.type !== "OPENING") {
+      groupBillNo = await generateBillNo(tx, input.accountId, input.type);
+    }
 
     // Step 2 — Insert the entry_group row
     const [group] = await tx
@@ -86,7 +94,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         date: input.date,
         type: input.type,
         account_id: input.accountId,
-        bill_no: input.billNo,
+        bill_no: groupBillNo,
         rate_per_gram: input.ratePerGram,
         remarks: input.remarks,
         reversal_of: input.reversalOf,

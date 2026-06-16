@@ -15,6 +15,10 @@ export async function generateEntryNo(
   tx: DbOrTx,
   tableName: string,
 ): Promise<number> {
+  await (tx as Database).execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext('entry_no_' || ${tableName}))`,
+  );
+
   const result = await (tx as Database).execute(
     `SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM "${tableName}"`,
   );
@@ -38,6 +42,10 @@ export async function generateEntryGroupNo(
   tx: DbOrTx,
   type: string,
 ): Promise<number> {
+  await (tx as Database).execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext('entry_group_no_' || ${type}))`,
+  );
+
   const result = await (tx as Database).execute(
     `SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM entry_groups WHERE type = '${type}'`,
   );
@@ -55,6 +63,10 @@ export async function generateEntryGroupNo(
  * @returns The next lot_id as a string e.g. 'LOT-0001'
  */
 export async function generateLotId(tx: DbOrTx): Promise<string> {
+  await (tx as Database).execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext('lot_id'))`,
+  );
+
   const result = await (tx as Database).execute(
     `SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) + 1 AS next_lot_no FROM "entries" WHERE lot_id IS NOT NULL`,
   );

@@ -17,6 +17,11 @@ export async function generateBillNo(
   accountId: string,
   type: string,
 ): Promise<number> {
+  // Lock the account row to serialize bill generation for this account
+  await tx.execute(
+    sql`SELECT id FROM ${accounts} WHERE id = ${accountId} FOR UPDATE`
+  );
+
   const [row] = await tx
     .select({ max: max(entryGroups.bill_no) })
     .from(entryGroups)

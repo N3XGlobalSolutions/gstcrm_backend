@@ -101,47 +101,66 @@ export async function getExpenseById(input: z.infer<typeof GetByIdSchema>) {
 
 // ─── createExpense ────────────────────────────────────────────────────────────
 
-export async function createExpense(input: z.infer<typeof CreateExpenseSchema>) {
+export async function createExpense(
+  input: z.infer<typeof CreateExpenseSchema>,
+  options?: { existingBillNo?: number; existingEntryNo?: number }
+) {
   if (toDecimal(input.amount).lte(0)) {
     throw new AppError("VALIDATION_ERROR", "Amount must be greater than zero");
   }
 
-  const expense_account_id = await findOrCreateExpenseAccount(input.name);
+  return db.transaction(async (tx) => {
+    const expense_account_id = await findOrCreateExpenseAccount(input.name);
 
-  const bill_no = await generateBillNo(db, SYSTEM_ACCOUNTS.EXPENSE_ID, "EXPENSE");
+    const bill_no = options?.existingBillNo ?? await generateBillNo(tx, SYSTEM_ACCOUNTS.EXPENSE_ID, "EXPENSE");
 
-  const { group, entries: created } = await createEntryGroup({
-    type: "EXPENSE",
-    accountId: expense_account_id,
-    date: input.date,
-    billNo: bill_no,
-    remarks: input.reason,
-    entries: [
-      {
-        fromAccountId: SYSTEM_ACCOUNTS.CASH_ID,
-        toAccountId: expense_account_id,
-        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-        quantity: input.amount,
-      },
-    ],
+    const { group, entries: created } = await createEntryGroup({
+      type: "EXPENSE",
+      accountId: expense_account_id,
+      date: input.date,
+      billNo: bill_no,
+      entryNo: options?.existingEntryNo,
+      remarks: input.reason,
+      entries: [
+        {
+          fromAccountId: SYSTEM_ACCOUNTS.CASH_ID,
+          toAccountId: expense_account_id,
+          itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+          quantity: input.amount,
+        },
+      ],
+    }, tx);
+
+    return { group, entries: created };
   });
-
-  return { group, entries: created };
 }
 
 // ─── updateExpense ────────────────────────────────────────────────────────────
 
 export async function updateExpense(input: z.infer<typeof UpdateExpenseSchema>) {
+  const [originalGroup] = await db
+    .select({
+      bill_no: entryGroups.bill_no,
+      entry_no: entryGroups.entry_no,
+    })
+    .from(entryGroups)
+    .where(eq(entryGroups.id, input.id))
+    .limit(1);
+
+  if (!originalGroup) {
+    throw new AppError("NOT_FOUND", "Expense not found");
+  }
+
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
-  return createExpense(createInput);
+  return createExpense(createInput, {
+    existingBillNo: originalGroup.bill_no ?? undefined,
+    existingEntryNo: originalGroup.entry_no ?? undefined,
+  });
 }
 
 // ─── deleteExpense ────────────────────────────────────────────────────────────
 
 export async function deleteExpense(input: z.infer<typeof DeleteExpenseSchema>) {
-  const tx = await getTransactionById(input.id);
-  if (!tx) throw new AppError("NOT_FOUND", "Expense not found");
-  await reverseEntryGroup(input.id);
-  return { success: true };
+  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for expenses");
 }

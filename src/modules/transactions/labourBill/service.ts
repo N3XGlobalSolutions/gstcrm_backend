@@ -12,7 +12,7 @@ import {
   getTransactionById,
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
-import { entries as entriesTable, items as itemsTable } from "@/db/schema";
+import { entries as entriesTable, items as itemsTable, entryGroups } from "@/db/schema";
 import { inArray, eq } from "drizzle-orm";
 import type { z } from "zod";
 import type {
@@ -30,6 +30,9 @@ import type {
 function calcOrnamentEntry(item: {
   quantity: string;
   purity: string;
+  stone?: string;
+  throde?: string;
+  chain?: string;
   wastage_percent: string;
 }): { grossWeight: string; pureQuantity: string; wastageGm: string } {
   const weight = toDecimal(item.quantity);
@@ -106,7 +109,10 @@ export async function getLabourBillById(input: z.infer<typeof GetByIdSchema>) {
 
 // ─── createLabourBill ─────────────────────────────────────────────────────────
 
-export async function createLabourBill(input: z.infer<typeof CreateLabourBillSchema>) {
+export async function createLabourBill(
+  input: z.infer<typeof CreateLabourBillSchema>,
+  options?: { existingBillNo?: number; existingEntryNo?: number }
+) {
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
   // ── 1. Gold Issue: SHOP → Goldsmith ────────────────────────────────────────
@@ -238,6 +244,8 @@ export async function createLabourBill(input: z.infer<typeof CreateLabourBillSch
     type: "LABOUR_BILL",
     accountId: input.account_id,
     date: input.date,
+    billNo: options?.existingBillNo,
+    entryNo: options?.existingEntryNo,
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     entries,
@@ -249,16 +257,29 @@ export async function createLabourBill(input: z.infer<typeof CreateLabourBillSch
 // ─── updateLabourBill ─────────────────────────────────────────────────────────
 
 export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSchema>) {
+  const [originalGroup] = await db
+    .select({
+      bill_no: entryGroups.bill_no,
+      entry_no: entryGroups.entry_no,
+    })
+    .from(entryGroups)
+    .where(eq(entryGroups.id, input.id))
+    .limit(1);
+
+  if (!originalGroup) {
+    throw new AppError("NOT_FOUND", "Labour bill not found");
+  }
+
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
-  return createLabourBill(createInput);
+  return createLabourBill(createInput, {
+    existingBillNo: originalGroup.bill_no ?? undefined,
+    existingEntryNo: originalGroup.entry_no ?? undefined,
+  });
 }
 
 // ─── deleteLabourBill ─────────────────────────────────────────────────────────
 
 export async function deleteLabourBill(input: z.infer<typeof DeleteTxSchema>) {
-  const tx = await getTransactionById(input.id);
-  if (!tx) throw new AppError("NOT_FOUND", "Labour bill not found");
-  await reverseEntryGroup(input.id);
-  return { success: true };
+  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for labour bills");
 }

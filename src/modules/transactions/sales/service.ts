@@ -90,7 +90,7 @@ export async function createSale(
   input: z.infer<typeof CreateSalesSchema>,
   creator: { id: string; username: string },
   isUpdate: boolean = false,
-  oldBillNo?: number | null
+  options?: { existingBillNo?: number; existingEntryNo?: number }
 ) {
   // Step 1 — Per-item wastage + pure calculations
   const processedItems = input.items.map((item) => {
@@ -134,7 +134,7 @@ export async function createSale(
     }
 
     // Step 6 — Bill number per customer (uses tx so it's consistent with the insert)
-    const bill_no = await generateBillNo(tx, input.account_id, "SALE");
+    const bill_no = options?.existingBillNo ?? await generateBillNo(tx, input.account_id, "SALE");
 
     // Step 7 — Build entries and write to ledger (lock still held)
     const entryInputs = [
@@ -168,6 +168,7 @@ export async function createSale(
         accountId: input.account_id,
         date: input.date,
         billNo: bill_no,
+        entryNo: options?.existingEntryNo,
         ratePerGram: input.rate_per_gram,
         remarks: input.remarks,
         entries: entryInputs,
@@ -185,7 +186,7 @@ export async function createSale(
 
     let message = "";
     if (isUpdate) {
-      message = `Sale Bill #${bill_no} (updated from #${oldBillNo || "Unknown"}) for Customer '${customerName}' was updated by ${creator.username}`;
+      message = `Sale Bill #${bill_no} (updated) for Customer '${customerName}' was updated by ${creator.username}`;
     } else {
       message = `Sale Bill #${bill_no} for Customer '${customerName}' was created by ${creator.username}`;
     }
@@ -200,41 +201,32 @@ export async function updateSale(
   input: z.infer<typeof UpdateSalesSchema>,
   creator: { id: string; username: string }
 ) {
-  const oldGroup = await db
-    .select({ bill_no: entryGroups.bill_no })
+  const [originalGroup] = await db
+    .select({
+      bill_no: entryGroups.bill_no,
+      entry_no: entryGroups.entry_no,
+    })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
     .limit(1);
-  const oldBillNo = oldGroup[0]?.bill_no;
+
+  if (!originalGroup) {
+    throw new AppError("NOT_FOUND", "Sale not found");
+  }
 
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
-  return createSale(createInput, creator, true, oldBillNo);
+  return createSale(createInput, creator, true, {
+    existingBillNo: originalGroup.bill_no ?? undefined,
+    existingEntryNo: originalGroup.entry_no ?? undefined,
+  });
 }
 
 export async function deleteSale(
   input: z.infer<typeof DeleteTxSchema>,
   creator: { id: string; username: string }
 ) {
-  const tx = await getTransactionById(input.id);
-  if (!tx) throw new AppError("NOT_FOUND", "Sale not found");
-
-  const [customer] = await db
-    .select({ name: accounts.name })
-    .from(accounts)
-    .where(eq(accounts.id, tx.group.account_id))
-    .limit(1);
-  const customerName = customer?.name || "Unknown Customer";
-
-  await reverseEntryGroup(input.id);
-
-  await createSystemNotification(
-    db,
-    `Sale Bill #${tx.group.bill_no} for Customer '${customerName}' was deleted (reversed) by ${creator.username}`,
-    creator.id
-  );
-
-  return { success: true };
+  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for sales");
 }
 
 export async function updateGSTConversion(

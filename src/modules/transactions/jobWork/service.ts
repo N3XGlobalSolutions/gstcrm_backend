@@ -16,6 +16,9 @@ import {
   listTransactions,
   getTransactionById,
 } from "@/lib/transactionQueries";
+import { db } from "@/db";
+import { entryGroups } from "@/db/schema";
+import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -88,7 +91,10 @@ function processOrnamentItem(item: {
   };
 }
 
-export async function createJobWork(input: z.infer<typeof CreateJobWorkSchema>) {
+export async function createJobWork(
+  input: z.infer<typeof CreateJobWorkSchema>,
+  options?: { existingBillNo?: number; existingEntryNo?: number }
+) {
   // Validate stock for all issues
   for (const item of input.gold_issue) {
     if (!item.lot_id) throw new AppError("VALIDATION_ERROR", "Lot ID is required for gold issue");
@@ -176,6 +182,8 @@ export async function createJobWork(input: z.infer<typeof CreateJobWorkSchema>) 
     type: "JOB_WORK",
     accountId: input.account_id,
     date: input.date,
+    billNo: options?.existingBillNo,
+    entryNo: options?.existingEntryNo,
     remarks: input.remarks,
     entries,
   });
@@ -184,14 +192,27 @@ export async function createJobWork(input: z.infer<typeof CreateJobWorkSchema>) 
 }
 
 export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) {
+  const [originalGroup] = await db
+    .select({
+      bill_no: entryGroups.bill_no,
+      entry_no: entryGroups.entry_no,
+    })
+    .from(entryGroups)
+    .where(eq(entryGroups.id, input.id))
+    .limit(1);
+
+  if (!originalGroup) {
+    throw new AppError("NOT_FOUND", "Job work not found");
+  }
+
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
-  return createJobWork(createInput);
+  return createJobWork(createInput, {
+    existingBillNo: originalGroup.bill_no ?? undefined,
+    existingEntryNo: originalGroup.entry_no ?? undefined,
+  });
 }
 
 export async function deleteJobWork(input: z.infer<typeof DeleteTxSchema>) {
-  const tx = await getTransactionById(input.id);
-  if (!tx) throw new AppError("NOT_FOUND", "Job work not found");
-  await reverseEntryGroup(input.id);
-  return { success: true };
+  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for job work");
 }
