@@ -95,19 +95,34 @@ export const memoryCache = new MemoryCache();
 
 /**
  * Extracts schema table names mentioned in a SQL query.
+ * Matches both double-quoted identifiers ("entries") and unquoted names (entries).
  */
 export function extractTables(sql: string): string[] {
   const tables = new Set<string>();
-  const regex = /"([^"]+)"/g;
+
+  // Match double-quoted identifiers: "table_name"
+  const quotedRegex = /"([^"]+)"/g;
   let match;
-  while ((match = regex.exec(sql)) !== null) {
+  while ((match = quotedRegex.exec(sql)) !== null) {
     const word = match[1];
     if (word && schemaTables.includes(word)) {
       tables.add(word);
     }
   }
+
+  // Match unquoted FROM/JOIN table references: FROM entries, JOIN entry_groups, etc.
+  // Captures the word immediately after FROM, JOIN, INNER JOIN, LEFT JOIN, RIGHT JOIN
+  const unquotedRegex = /(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi;
+  while ((match = unquotedRegex.exec(sql)) !== null) {
+    const word = match[1];
+    if (word && schemaTables.includes(word)) {
+      tables.add(word);
+    }
+  }
+
   return Array.from(tables);
 }
+
 
 /**
  * Determines whether a query is a read query.

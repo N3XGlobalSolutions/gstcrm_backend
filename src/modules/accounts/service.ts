@@ -2,7 +2,7 @@ import { db } from "@/db";
 import { AppError } from "@/types/errors";
 import { generateEntryNo } from "@/lib/entryNoGenerator";
 import { createEntryGroup } from "@/lib/entryBuilder";
-import { getBalance } from "@/lib/balance";
+import { getBalance, getAggregateBalances } from "@/lib/balance";
 import { toDecimal } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import type { z } from "zod";
@@ -23,6 +23,8 @@ import {
   updateAccount,
   softDeleteAccount,
 } from "./queries";
+import { entryGroups } from "@/db/schema";
+import { eq, and, isNotNull, desc, not } from "drizzle-orm";
 
 // ─── listAccounts ─────────────────────────────────────────────────────────────
 
@@ -59,7 +61,8 @@ export async function createAccount(
   const today = new Date().toISOString().split("T")[0]!;
 
   // Step 2: Opening pure balance → OPENING entry: SHOP → new account
-  // NOTE: Opening balance changes do NOT retroactively alter ledger entries (by design)
+  // Stored via pureQuantity (not as a RUPEE quantity) so it accumulates in totalPure
+  // (pure_quantity SUM) rather than totalCash (RUPEE_ITEM_ID quantity SUM).
   if (toDecimal(input.opening_pure_balance).gt(0)) {
     await createEntryGroup({
       type: "OPENING",
@@ -71,7 +74,8 @@ export async function createAccount(
           fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
           toAccountId: account.id,
           itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-          quantity: input.opening_pure_balance,
+          quantity: "0",
+          pureQuantity: input.opening_pure_balance,
         },
       ],
     });
@@ -201,14 +205,10 @@ export async function getAccountBalance(
 export async function getAccountAggregateBalances(
   input: z.infer<typeof GetAggregateBalancesSchema>,
 ) {
-  const { getAggregateBalances } = await import("@/lib/balance");
-  const { entryGroups } = await import("@/db/schema");
-  const { eq, and, isNotNull, desc, not } = await import("drizzle-orm");
-
   const asOfDate = input.asOfDate ? new Date(input.asOfDate) : undefined;
   const balances = await getAggregateBalances(input.accountId, asOfDate, input.excludeGroupId);
 
-  // Fetch the most recent rate for this account (from any PURCHASE transaction)
+  // Fetch the most recent sale rate for this account (excludes REVERSAL groups)
   const [lastGroup] = await db
     .select({ rate_per_gram: entryGroups.rate_per_gram })
     .from(entryGroups)
@@ -216,7 +216,7 @@ export async function getAccountAggregateBalances(
       and(
         eq(entryGroups.account_id, input.accountId),
         eq(entryGroups.is_deleted, false),
-        not(eq(entryGroups.type, 'REVERSAL')),
+        not(eq(entryGroups.type, "REVERSAL")),
         isNotNull(entryGroups.rate_per_gram),
       ),
     )
@@ -226,6 +226,10 @@ export async function getAccountAggregateBalances(
   return {
     totalPure: balances.totalPure.toFixed(8),
     totalCash: balances.totalCash.toFixed(2),
+    // Rate-stable opening balance in pure grams.
+    // Each payment is divided by the rate of its own bill (not the latest rate),
+    // so changing the rate on a future bill never creates phantom balance.
+    balancePure: balances.balancePure.toFixed(8),
     lastRate: lastGroup?.rate_per_gram ?? null,
   };
 }
@@ -233,4 +237,3 @@ export async function getAccountAggregateBalances(
 export async function getAccountById(id: string) {
   return findAccountById(id);
 }
-

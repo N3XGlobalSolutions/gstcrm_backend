@@ -36,6 +36,7 @@ export interface EntryInput {
   itemId: string;
   quantity: string; // decimal string
   purity?: string; // touch percentage, decimal string
+  pureQuantity?: string; // direct pure_quantity override (used for opening balances)
   wastageMode?: WastageMode;
   wastageValue?: string; // decimal string
   rate?: string; // decimal string
@@ -121,9 +122,11 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
     // Step 3 — Insert each entry with computed quantities
     const insertedEntries = [];
     for (const entry of input.entries) {
-      // Compute pure_quantity if purity is provided
+      // Compute pure_quantity from purity, or use direct override if provided
       let pureQuantity: string | undefined;
-      if (entry.purity) {
+      if (entry.pureQuantity) {
+        pureQuantity = entry.pureQuantity;
+      } else if (entry.purity) {
         pureQuantity = toQuantityString(calcPure(entry.quantity, entry.purity));
       }
 

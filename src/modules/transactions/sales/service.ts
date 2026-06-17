@@ -89,7 +89,11 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
 
       return {
         ...d,
-        openingPure: opening.totalPure.toFixed(4),
+        // openingPure = rate-stable balance before this bill (pure grams).
+        // balancePure = totalPure − Σ(prior_payment / prior_rate) — never affected by rate changes.
+        openingPure: opening.balancePure.toFixed(4),
+        // openingCash is kept for backward compatibility display in the history table.
+        // It is the raw totalCash ledger value (negative = prior payments sent by customer).
         openingCash: opening.totalCash.toFixed(2),
         isConverted: d.isConverted,
         canUndoConversion: d.canUndoConversion,
@@ -306,11 +310,12 @@ export async function updateGSTConversion(
       new Date(originalGroup.created_at),
       originalGroup.id
     );
-    const openingPure = parseFloat(opening.totalPure.toString() || "0");
-    const openingCash = parseFloat(opening.totalCash.toString() || "0");
+    const openingPure = parseFloat(opening.balancePure.toString() || "0");
 
-    const totalPaidCash = openingCash + bankPaidAmount;
-    const balancePure = openingPure + currentPure - (rate > 0 ? totalPaidCash / rate : 0);
+    // Rate-stable formula: opening balance + gold this bill − payment this bill / rate this bill.
+    // openingPure is already Σ(pure_sold) − Σ(payment/rate) for all PRIOR bills.
+    const billPaymentPure = rate > 0 ? bankPaidAmount / rate : 0;
+    const balancePure = openingPure + currentPure - billPaymentPure;
     const balanceCash = balancePure * rate;
 
     // 3. Create the flat copy in the gst_sales_history table

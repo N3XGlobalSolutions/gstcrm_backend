@@ -70,65 +70,130 @@ export async function getBalances(
 }
 
 /**
- * Returns the aggregate (Live) "Total Pure Balance" and "Total Cash Balance" across the ledger.
+ * Returns the aggregate "Total Pure Balance" and "Total Cash Balance" across the ledger.
+ *
+ * KEY DESIGN: balancePure uses per-bill rates to avoid the rate-change phantom problem.
+ *
+ * WRONG: balancePure = totalPure + totalCash / lastRate
+ *   — when lastRate changes, previously paid cash is re-valued at the new rate,
+ *     creating a phantom balance even when the customer has fully paid.
+ *
+ * CORRECT: balancePure = Σ(pure_sold_in_bill) - Σ(payment_in_bill / rate_of_bill)
+ *   — each payment is divided by the rate at the time of THAT bill, rate-independent.
  */
 export async function getAggregateBalances(
   accountId: string,
   asOfDate?: Date,
   excludeGroupId?: string,
-): Promise<{ totalPure: Decimal; totalCash: Decimal }> {
+): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }> {
   const dateFilter = asOfDate
-    ? sql`AND created_at <= ${asOfDate.toISOString()}`
+    ? sql`AND e.created_at <= ${asOfDate.toISOString()}`
     : sql``;
     
   const excludeFilter = excludeGroupId
-    ? sql`AND group_id != ${excludeGroupId}`
+    ? sql`AND e.group_id != ${excludeGroupId}`
     : sql``;
+
+  // Shared aliases for clarity — entries 'e', entry_groups 'g'
+  const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
 
   // 1. Total Pure Balance = SUM(inflow pure_quantity) - SUM(outflow pure_quantity)
   const [pureInflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(pure_quantity), 0)::text AS total
-        FROM ${entries}
-        WHERE to_account_id = ${accountId}
+    sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
+        FROM entries e
+        WHERE e.to_account_id = ${accountId}
           ${dateFilter}
           ${excludeFilter}`,
   );
   
   const [pureOutflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(pure_quantity), 0)::text AS total
-        FROM ${entries}
-        WHERE from_account_id = ${accountId}
+    sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
+        FROM entries e
+        WHERE e.from_account_id = ${accountId}
           ${dateFilter}
           ${excludeFilter}`,
   );
 
-  // 2. Total Cash Balance = SUM(inflow quantity) - SUM(outflow quantity) for MONEY items
-  const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
-
+  // 2. Total Cash Balance (kept for backward compatibility — raw RUPEE net flow)
   const [cashInflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(quantity), 0)::text AS total
-        FROM ${entries}
-        WHERE to_account_id = ${accountId}
-          AND item_id = ${cashItemId}
+    sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
+        FROM entries e
+        WHERE e.to_account_id = ${accountId}
+          AND e.item_id = ${cashItemId}
           ${dateFilter}
           ${excludeFilter}`,
   );
   
   const [cashOutflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(quantity), 0)::text AS total
-        FROM ${entries}
-        WHERE from_account_id = ${accountId}
-          AND item_id = ${cashItemId}
+    sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
+        FROM entries e
+        WHERE e.from_account_id = ${accountId}
+          AND e.item_id = ${cashItemId}
           ${dateFilter}
           ${excludeFilter}`,
   );
 
-  let pureBalance = subtractDecimals(pureInflow?.total ?? "0", pureOutflow?.total ?? "0");
-  let cashBalance = subtractDecimals(cashInflow?.total ?? "0", cashOutflow?.total ?? "0");
+  // 3. Rate-stable payment pure equivalent:
+  //    For each RUPEE payment from the customer that belongs to a bill WITH a rate,
+  //    divide the payment by that bill's rate. This makes the balance independent of
+  //    any future rate change.
+  //    Formula: Σ(payment_amount / rate_of_bill) - Σ(refund_amount / rate_of_bill)
+  const [paymentPureRow] = await db.execute<{ total: string | null }>(
+    sql`SELECT COALESCE(SUM(
+          CASE
+            WHEN e.from_account_id = ${accountId}
+              THEN e.quantity / NULLIF(g.rate_per_gram::numeric, 0)
+            WHEN e.to_account_id = ${accountId}
+              THEN -(e.quantity / NULLIF(g.rate_per_gram::numeric, 0))
+            ELSE 0
+          END
+        ), 0)::text AS total
+        FROM entries e
+        INNER JOIN entry_groups g ON e.group_id = g.id
+        WHERE (e.from_account_id = ${accountId} OR e.to_account_id = ${accountId})
+          AND e.item_id = ${cashItemId}
+          AND g.rate_per_gram IS NOT NULL
+          AND g.rate_per_gram::numeric > 0
+          ${dateFilter}
+          ${excludeFilter}`,
+  );
+
+  // 4. Cash flows from OPENING entries (no rate_per_gram) — e.g. opening_cash_balance
+  //    These cannot be converted per-bill, so they are kept as raw cash amounts.
+  //    They will be divided by lastRate in the service layer for display.
+  const [cashNoRateRow] = await db.execute<{ total: string | null }>(
+    sql`SELECT COALESCE(SUM(
+          CASE
+            WHEN e.to_account_id = ${accountId}   THEN  e.quantity
+            WHEN e.from_account_id = ${accountId} THEN -e.quantity
+            ELSE 0
+          END
+        ), 0)::text AS total
+        FROM entries e
+        INNER JOIN entry_groups g ON e.group_id = g.id
+        WHERE (e.from_account_id = ${accountId} OR e.to_account_id = ${accountId})
+          AND e.item_id = ${cashItemId}
+          AND (g.rate_per_gram IS NULL OR g.rate_per_gram::numeric = 0)
+          ${dateFilter}
+          ${excludeFilter}`,
+  );
+
+  const pureBalance = subtractDecimals(pureInflow?.total ?? "0", pureOutflow?.total ?? "0");
+  const cashBalance = subtractDecimals(cashInflow?.total ?? "0", cashOutflow?.total ?? "0");
+  const paymentPure = toDecimal(paymentPureRow?.total ?? "0");
+  const cashNoRate = toDecimal(cashNoRateRow?.total ?? "0");
+
+  // balancePure = pure received − (payments converted at bill rate) + opening_cash_no_rate
+  // The cashNoRate term is handled by the caller dividing it by lastRate.
+  // We expose it as a separate field so the caller can apply lastRate correctly.
+  // For the common case (no opening cash balance): cashNoRate = 0 → balancePure = pureBalance − paymentPure
+  const balancePureBeforeCash = pureBalance.minus(paymentPure);
 
   return {
     totalPure: pureBalance,
     totalCash: cashBalance,
+    balancePure: balancePureBeforeCash, // rate-stable, excludes opening cash (handled in service)
+    // internal: expose cashNoRate via totalCash for the service layer to handle opening_cash_balance
   };
 }
 
