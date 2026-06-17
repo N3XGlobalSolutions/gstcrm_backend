@@ -19,6 +19,7 @@ import {
   deletePurchase,
   updateGSTPurchaseConversion,
   listGSTPurchaseHistory,
+  undoGSTPurchaseConversion,
 } from "./service";
 
 export const purchaseRouter = router({
@@ -35,5 +36,6 @@ export const purchaseRouter = router({
   update: guardedProcedure("purchase", "purchase", "edit").input(UpdatePurchaseSchema).mutation(async ({ input }) => updatePurchase(input)),
   delete: guardedProcedure("purchase", "purchase", "delete").input(DeleteTxSchema).mutation(async ({ input }) => deletePurchase(input)),
   updateGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(UpdateGSTPurchaseConversionSchema).mutation(async ({ input }) => updateGSTPurchaseConversion(input)),
+  undoGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTPurchaseConversion(input.id)),
 });
 

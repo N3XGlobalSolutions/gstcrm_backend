@@ -15,6 +15,7 @@ import {
   deleteSale,
   updateGSTConversion,
   listGSTHistory,
+  undoGSTConversion,
 } from "./service";
 
 export const salesRouter = router({
@@ -25,4 +26,5 @@ export const salesRouter = router({
   update: guardedProcedure("sales", "sales", "edit").input(UpdateSalesSchema).mutation(async ({ input, ctx }) => updateSale(input, ctx.user!)),
   delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(async ({ input, ctx }) => deleteSale(input, ctx.user!)),
   updateGSTConversion: guardedProcedure("sales", "sales", "edit").input(UpdateGSTConversionSchema).mutation(async ({ input }) => updateGSTConversion(input)),
+  undoGSTConversion: guardedProcedure("sales", "sales", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTConversion(input.id)),
 });

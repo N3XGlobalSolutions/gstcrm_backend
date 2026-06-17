@@ -35,18 +35,35 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
 
   // Check which purchases have been converted to GST
   const convertedGroups = await db
-    .select({ purchase_id: gstPurchaseHistory.purchase_id })
+    .select({ purchase_id: gstPurchaseHistory.purchase_id, created_at: gstPurchaseHistory.created_at })
     .from(gstPurchaseHistory)
     .where(inArray(gstPurchaseHistory.purchase_id, groupIds));
 
-  const convertedSet = new Set(convertedGroups.map((c) => c.purchase_id));
+  // Find the single overall latest GST purchase conversion
+  const [latestGstPurchase] = await db
+    .select({
+      purchase_id: gstPurchaseHistory.purchase_id,
+      created_at: gstPurchaseHistory.created_at,
+    })
+    .from(gstPurchaseHistory)
+    .orderBy(desc(gstPurchaseHistory.created_at))
+    .limit(1);
+
+  const convertedMap = new Map(convertedGroups.map((c) => [c.purchase_id, c.created_at]));
 
   const enrichedData = result.data.map((d) => {
     const groupEntries = txEntries.filter(e => e.entry.group_id === d.group.id);
+    const isConverted = convertedMap.has(d.group.id);
+    const isLatest = latestGstPurchase && d.group.id === latestGstPurchase.purchase_id;
+    const convertedAt = convertedMap.get(d.group.id);
+    const isWithinTime = isLatest && convertedAt && (Date.now() - new Date(convertedAt).getTime()) <= 10 * 60 * 1000;
+
     return {
       ...d,
       entries: groupEntries,
-      isConverted: convertedSet.has(d.group.id),
+      isConverted,
+      canUndoConversion: !!(isLatest && isWithinTime),
+      convertedAt: convertedAt ? convertedAt.toISOString() : null,
     };
   });
 
@@ -64,6 +81,8 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
         openingPure: opening.totalPure.toFixed(4),
         openingCash: opening.totalCash.toFixed(2),
         isConverted: d.isConverted,
+        canUndoConversion: d.canUndoConversion,
+        convertedAt: d.convertedAt,
       };
     })
   );
@@ -321,5 +340,40 @@ export async function listGSTPurchaseHistory(input: z.infer<typeof ListTxSchema>
   }));
 
   return { data: mappedData, total: countRow?.total ?? 0 };
+}
+
+export async function undoGSTPurchaseConversion(purchaseId: string) {
+  return db.transaction(async (tx) => {
+    // 1. Fetch the corresponding row in gstPurchaseHistory
+    const [gstRow] = await tx
+      .select()
+      .from(gstPurchaseHistory)
+      .where(eq(gstPurchaseHistory.purchase_id, purchaseId))
+      .limit(1);
+
+    if (!gstRow) throw new AppError("NOT_FOUND", "GST conversion record not found");
+
+    // 2. Enforce the sequence/timing check
+    const [latestGstPurchase] = await tx
+      .select({ id: gstPurchaseHistory.id, created_at: gstPurchaseHistory.created_at })
+      .from(gstPurchaseHistory)
+      .orderBy(desc(gstPurchaseHistory.created_at))
+      .limit(1);
+
+    if (!latestGstPurchase || latestGstPurchase.id !== gstRow.id) {
+      throw new AppError("BUSINESS_RULE_VIOLATION", "Only the most recent GST conversion can be undone");
+    }
+
+    // Check if 10 minutes have passed
+    const elapsedMs = Date.now() - new Date(gstRow.created_at).getTime();
+    if (elapsedMs > 10 * 60 * 1000) {
+      throw new AppError("BUSINESS_RULE_VIOLATION", "GST conversion can only be undone within 10 minutes");
+    }
+
+    // 3. Delete the GST conversion copy
+    await tx.delete(gstPurchaseHistory).where(eq(gstPurchaseHistory.id, gstRow.id));
+
+    return { success: true };
+  });
 }
 
