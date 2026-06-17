@@ -62,9 +62,9 @@ export async function listTransactions(
   
   if (input.is_converted !== undefined) {
     if (input.is_converted) {
-      conditions.push(sql`${entryGroups.gst_amount} IS NOT NULL AND ${entryGroups.gst_amount} != '0'`);
+      conditions.push(sql`(${entryGroups.gst_amount} IS NOT NULL AND ${entryGroups.gst_amount} != '0')`);
     } else {
-      conditions.push(sql`${entryGroups.gst_amount} IS NULL OR ${entryGroups.gst_amount} = '0'`);
+      conditions.push(sql`(${entryGroups.gst_amount} IS NULL OR ${entryGroups.gst_amount} = '0')`);
     }
   }
 
