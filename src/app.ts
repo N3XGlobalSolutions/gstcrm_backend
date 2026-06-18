@@ -3,8 +3,9 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import morgan from "morgan";
 import * as trpcExpress from "@trpc/server/adapters/express";
+import { requestLogger } from "@/middlewares/requestLogger";
+import { logger } from "@/lib/logger";
 import { createContext } from "@/lib/context";
 import { appRouter } from "@/app.router";
 import authRouter from "@/modules/auth/router";
@@ -16,8 +17,8 @@ import { sql } from "drizzle-orm";
 
 const app = express();
 
-// Use morgan for HTTP request logging
-app.use(morgan("dev"));
+// Use custom human-readable HTTP and tRPC logger
+app.use(requestLogger);
 
 // Trust first proxy so rate-limiter reads the real client IP from X-Forwarded-For
 app.set("trust proxy", 1);
@@ -136,6 +137,9 @@ app.use(
   trpcExpress.createExpressMiddleware({
     router: appRouter,
     createContext,
+    onError({ path, error }) {
+      logger.error(`Error in tRPC procedure [${path || "unknown"}]:`, error, "tRPC");
+    },
   })
 );
 

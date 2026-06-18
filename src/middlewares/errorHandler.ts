@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError, ErrorHttpStatus } from "@/types/errors";
 import { env } from "@/config/env";
+import { logger } from "@/lib/logger";
 
 /**
  * Global Express error handler — must be registered as the LAST middleware in app.ts.
@@ -23,7 +24,7 @@ export function globalErrorHandler(
   }
 
   // Log unexpected errors
-  console.error("[Unhandled Error]", err);
+  logger.error("Unhandled server error", err, "EXPRESS");
 
   const message = env.IS_PROD
     ? "An internal server error occurred."

@@ -56,7 +56,7 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     const isConverted = convertedMap.has(d.group.id);
     const isLatest = latestGstPurchase && d.group.id === latestGstPurchase.purchase_id;
     const convertedAt = convertedMap.get(d.group.id);
-    const isWithinTime = isLatest && convertedAt && (Date.now() - new Date(convertedAt).getTime()) <= 10 * 60 * 1000;
+    const isWithinTime = isLatest && convertedAt && (Date.now() - new Date(convertedAt).getTime()) <= 12 * 60 * 60 * 1000;
 
     return {
       ...d,
@@ -364,10 +364,10 @@ export async function undoGSTPurchaseConversion(purchaseId: string) {
       throw new AppError("BUSINESS_RULE_VIOLATION", "Only the most recent GST conversion can be undone");
     }
 
-    // Check if 10 minutes have passed
+    // Check if 12 hours have passed
     const elapsedMs = Date.now() - new Date(gstRow.created_at).getTime();
-    if (elapsedMs > 10 * 60 * 1000) {
-      throw new AppError("BUSINESS_RULE_VIOLATION", "GST conversion can only be undone within 10 minutes");
+    if (elapsedMs > 12 * 60 * 60 * 1000) {
+      throw new AppError("BUSINESS_RULE_VIOLATION", "GST conversion can only be undone within 12 hours");
     }
 
     // 3. Delete the GST conversion copy

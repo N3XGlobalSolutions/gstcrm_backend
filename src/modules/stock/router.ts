@@ -4,7 +4,7 @@ import { getBalances, getLotBalances } from "@/lib/balance";
 import { toDecimal } from "@/lib/decimal";
 import { db } from "@/db";
 import { items, accounts } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, or } from "drizzle-orm";
 import { SYSTEM_ACCOUNTS } from "@/config/constants";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { TRPCError } from "@trpc/server";
@@ -23,7 +23,12 @@ async function getSummary() {
   const goldsmiths = await db
     .select({ id: accounts.id })
     .from(accounts)
-    .where(and(eq(accounts.type, "GOLDSMITH"), eq(accounts.is_deleted, false)));
+    .where(
+      and(
+        or(eq(accounts.type, "GOLDSMITH"), eq(accounts.customer_type, "GOLD_SMITH")),
+        eq(accounts.is_deleted, false)
+      )
+    );
 
   const zero = toDecimal("0");
 
@@ -149,7 +154,12 @@ async function getMcGoldStock() {
   const goldsmiths = await db
     .select()
     .from(accounts)
-    .where(and(eq(accounts.type, "GOLDSMITH"), eq(accounts.is_deleted, false)));
+    .where(
+      and(
+        or(eq(accounts.type, "GOLDSMITH"), eq(accounts.customer_type, "GOLD_SMITH")),
+        eq(accounts.is_deleted, false)
+      )
+    );
 
   const goldItems = await db
     .select()
@@ -449,6 +459,118 @@ async function getProfitLossStock(input: { page: number; limit: number }) {
   };
 }
 
+// ─── stock.getExportData ──────────────────────────────────────────────────────
+
+async function getExportData() {
+  const { entries: entriesTable, entryGroups } = await import("@/db/schema");
+  const { inArray, desc } = await import("drizzle-orm");
+
+  // 1. Gold Stock
+  const goldItems = await db
+    .select()
+    .from(items)
+    .where(and(eq(items.type, "GOLD"), eq(items.is_deleted, false)))
+    .orderBy(items.entry_no);
+
+  const goldLots = [];
+  for (const item of goldItems) {
+    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
+    for (const lot of lots) {
+      goldLots.push({
+        "Lot ID": lot.lot_id ?? "-",
+        "Gold Type": item.name,
+        "Weight (g)": Number(lot.quantity.toFixed(3)),
+        "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+        "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
+        "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
+      });
+    }
+  }
+
+  // 2. Ornament Stock
+  const ornamentItems = await db
+    .select()
+    .from(items)
+    .where(and(eq(items.type, "ORNAMENT"), eq(items.is_deleted, false)))
+    .orderBy(items.entry_no);
+
+  const ornamentLots = [];
+  for (const item of ornamentItems) {
+    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
+    for (const lot of lots) {
+      ornamentLots.push({
+        "Lot ID": lot.lot_id ?? "-",
+        "Ornament Type": item.name,
+        "Weight (g)": Number(lot.quantity.toFixed(3)),
+        "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+        "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
+      });
+    }
+  }
+
+  // 3. MC Gold Stock
+  const mcGoldStock = await getMcGoldStock();
+  const mcGoldLots = mcGoldStock.map((row) => ({
+    "Goldsmith": row.goldsmith.name,
+    "Lot ID": row.lot_id ?? "-",
+    "Gold Type": row.item.name,
+    "Weight (g)": Number(Number(row.balance).toFixed(3)),
+    "Touch %": row.purity ? Number(Number(row.purity).toFixed(2)) : 0,
+    "Pure Weight (g)": row.pure_balance ? Number(Number(row.pure_balance).toFixed(3)) : 0,
+    "Date Added": new Date(row.created_at).toLocaleDateString("en-IN"),
+  }));
+
+  // 4. Profit / Loss Stock
+  const conditions = [
+    eq(entryGroups.is_deleted, false),
+    inArray(entryGroups.type, ["SALE", "PURCHASE"]),
+    inArray(items.type, ["GOLD", "ORNAMENT"]),
+  ];
+
+  const profitLossData = await db
+    .select({
+      entry: entriesTable,
+      group: entryGroups,
+      item: items,
+    })
+    .from(entriesTable)
+    .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
+    .innerJoin(items, eq(entriesTable.item_id, items.id))
+    .where(and(...conditions))
+    .orderBy(desc(entryGroups.created_at));
+
+  const profitLossLots = profitLossData.map((row, index) => {
+    const isPurchase = row.group.type === "PURCHASE";
+    const quantity = toDecimal(row.entry.quantity);
+    const purity = toDecimal(row.entry.purity || "1.0");
+    const pure = toDecimal(row.entry.pure_quantity || "0");
+    const rate = toDecimal(row.entry.rate || row.group.rate_per_gram || "0");
+    const total = pure.mul(rate);
+
+    return {
+      "Entry No": String(index + 1).padStart(3, "0"),
+      "Type": isPurchase ? "Purchase" : "Sale",
+      "Bill No": String(row.group.bill_no ?? 0),
+      "Date": new Date(row.group.date).toLocaleDateString("en-IN"),
+      "Item Name": row.item.name,
+      "Quantity": Number(quantity.toFixed(3)),
+      "Weight (g)": Number(quantity.toFixed(3)),
+      "Touch %": Number(purity.toFixed(2)),
+      "Buying Price (Rate)": isPurchase ? Number(rate.toFixed(2)) : 0,
+      "Selling Price (Rate)": !isPurchase ? Number(rate.toFixed(2)) : 0,
+      "Pure Weight (g)": Number(pure.toFixed(3)),
+      "Total Amount": Number(total.toFixed(2)),
+    };
+  });
+
+  return {
+    goldStock: goldLots,
+    ornamentStock: ornamentLots,
+    mcGoldStock: mcGoldLots,
+    profitLossStock: profitLossLots,
+  };
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 const PageSchema = z.object({
@@ -462,6 +584,7 @@ export const stockRouter = router({
   getOrnamentStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getOrnamentStock(input)),
   getMcGoldStock: protectedProcedure.query(async () => getMcGoldStock()),
   getProfitLossStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getProfitLossStock(input)),
+  getExportData: protectedProcedure.query(async () => getExportData()),
   addOpeningStock: guardedProcedure("stock", "stock", "edit")
     .input(AddOpeningStockSchema)
     .mutation(async ({ input }) => addOpeningStock(input)),

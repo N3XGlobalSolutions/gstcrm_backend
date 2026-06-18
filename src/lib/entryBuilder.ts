@@ -113,11 +113,11 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
 
     const [itemTypes, accountTypes] = await Promise.all([
       tx.select({ id: itemsTable.id, type: itemsTable.type }).from(itemsTable).where(inArray(itemsTable.id, itemIds)),
-      tx.select({ id: accountsTable.id, type: accountsTable.type }).from(accountsTable).where(inArray(accountsTable.id, toAccountIds)),
+      tx.select({ id: accountsTable.id, type: accountsTable.type, customer_type: accountsTable.customer_type }).from(accountsTable).where(inArray(accountsTable.id, toAccountIds)),
     ]);
 
     const itemTypeMap = new Map(itemTypes.map((i) => [i.id, i.type]));
-    const accountTypeMap = new Map(accountTypes.map((a) => [a.id, a.type]));
+    const accountTypeMap = new Map(accountTypes.map((a) => [a.id, a]));
 
     // Step 3 — Insert each entry with computed quantities
     const insertedEntries = [];
@@ -148,10 +148,16 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
       let finalLotId = entry.lotId;
       if (!finalLotId) {
         const itemType = itemTypeMap.get(entry.itemId);
-        const toAccountType = accountTypeMap.get(entry.toAccountId);
+        const toAccount = accountTypeMap.get(entry.toAccountId);
+        const toAccountType = toAccount?.type;
+        const toCustomerType = toAccount?.customer_type;
         if (
           (itemType === "GOLD" || itemType === "ORNAMENT") &&
-          (toAccountType === "SHOP" || toAccountType === "GOLDSMITH")
+          (
+            toAccountType === "SHOP" ||
+            toAccountType === "GOLDSMITH" ||
+            (toAccountType === "CUSTOMER" && toCustomerType === "GOLD_SMITH")
+          )
         ) {
           finalLotId = await generateLotId(tx);
         }

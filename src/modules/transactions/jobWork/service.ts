@@ -10,15 +10,15 @@ import {
   toDecimal,
   toQuantityString,
 } from "@/lib/decimal";
-import { getLotBalances } from "@/lib/balance";
+import { getLotBalances, getAggregateBalances } from "@/lib/balance";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import {
   listTransactions,
   getTransactionById,
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
-import { entryGroups } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { entryGroups, entries as entriesTable, items as itemsTable } from "@/db/schema";
+import { eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -29,7 +29,43 @@ import type {
 } from "./schema";
 
 export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
-  return listTransactions("JOB_WORK", input);
+  const result = await listTransactions("JOB_WORK", input);
+
+  if (result.data.length === 0) return result;
+
+  const groupIds = result.data.map((d) => d.group.id);
+  const txEntries = await db
+    .select({
+      entry: entriesTable,
+      item_name: itemsTable.name,
+      item_type: itemsTable.type,
+    })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(inArray(entriesTable.group_id, groupIds));
+
+  const finalData = await Promise.all(
+    result.data.map(async (d) => {
+      const groupEntries = txEntries.filter(
+        (e) => e.entry.group_id === d.group.id,
+      );
+
+      const opening = await getAggregateBalances(
+        d.group.account_id,
+        new Date(d.group.created_at),
+        d.group.id,
+      );
+
+      return {
+        ...d,
+        entries: groupEntries,
+        openingPure: opening.totalPure.toFixed(4),
+        openingCash: opening.totalCash.toFixed(2),
+      };
+    }),
+  );
+
+  return { ...result, data: finalData };
 }
 
 export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
