@@ -78,8 +78,8 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
 
       return {
         ...d,
-        openingPure: opening.totalPure.toFixed(4),
-        openingCash: opening.totalCash.toFixed(2),
+        openingPure: (-parseFloat(opening.balancePure.toString() || "0")).toFixed(4),
+        openingCash: ((-parseFloat(opening.balancePure.toString() || "0")) * (d.group.rate_per_gram ? parseFloat(d.group.rate_per_gram) : 0)).toFixed(2),
         isConverted: d.isConverted,
         canUndoConversion: d.canUndoConversion,
         convertedAt: d.convertedAt,
@@ -110,6 +110,28 @@ export async function createPurchase(
   if (allItems.length === 0) {
     throw new AppError("VALIDATION_ERROR", "At least one item is required");
   }
+
+  // ── Settle-to-zero enforcement ──────────────────────────────────────────────
+  // Every purchase bill must be fully settled on the spot.
+  // totalPureValue * rate - bankAmount - discount must be ≈ 0.
+  const rate = parseFloat(input.rate_per_gram || '0');
+  const totalPureValue = allItems.reduce((sum, item) => {
+    const weight = parseFloat(item.quantity || '0');
+    const purity = parseFloat(item.purity || '0');
+    return sum + weight * purity;
+  }, 0);
+  const totalCashValue = totalPureValue * rate;
+  const bankAmount = parseFloat(input.bank_amount || '0');
+  const discount = parseFloat(input.discount || '0');
+  const remainingBalance = totalCashValue - bankAmount - discount;
+
+  if (Math.abs(remainingBalance) > 0.01) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Purchase bill must be fully settled. Remaining balance: ₹${remainingBalance.toFixed(2)}. Adjust Bank amount or Discount.`
+    );
+  }
+  // ───────────────────────────────────────────────────────────────────────────
 
   // Step 6 — Build entries (from: supplier → SHOP for goods; SHOP → supplier for cash)
   const entryInputs = [
@@ -239,13 +261,7 @@ export async function updateGSTPurchaseConversion(
       new Date(originalGroup.created_at),
       originalGroup.id
     );
-    const rawOpeningPure = parseFloat(opening.totalPure.toString() || "0");
-    const rawOpeningCash = parseFloat(opening.totalCash.toString() || "0");
-
-    const priorPureGiven = -rawOpeningPure;
-    const priorBalancePure = rate > 0
-      ? priorPureGiven - rawOpeningCash / rate
-      : priorPureGiven;
+    const priorBalancePure = -parseFloat(opening.balancePure.toString() || "0");
     
     const balancePure = priorBalancePure + currentPure - (rate > 0 ? bankPaidAmount / rate : 0);
     const balanceCash = balancePure * rate;

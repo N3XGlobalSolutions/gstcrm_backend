@@ -41,7 +41,8 @@ async function run() {
     sql`SELECT id, name, type FROM items WHERE id = '00000000-0000-0000-0000-000000000010'`
   );
   console.log("\n--- System RUPEE item ---");
-  console.log(`  Found: ${rupee.length > 0 ? `${rupee[0].name} (${rupee[0].type})` : "MISSING!"}`);
+  const firstRupee = rupee[0];
+  console.log(`  Found: ${firstRupee ? `${firstRupee.name} (${firstRupee.type})` : "MISSING!"}`);
 
   // 5. Verify no PURCHASE records leak into SALE queries (the bug we fixed)
   const salesQuery = await db.execute<{ type: string; cnt: string }>(
