@@ -47,8 +47,8 @@ app.use(
         return callback(null, true);
       }
 
-      // Dynamically allow any Cloudflare Pages preview/branch deployments
-      if (origin.endsWith(".pages.dev")) {
+      // Dynamically allow any Cloudflare Pages preview/branch deployments and Workers deployments
+      if (origin.endsWith(".pages.dev") || origin.endsWith(".workers.dev")) {
         return callback(null, true);
       }
       
