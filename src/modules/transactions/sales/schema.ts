@@ -29,8 +29,18 @@ export const CreateSalesSchema = z.object({
   rate_per_gram: z.string(),
   remarks: z.string().optional(),
   items: z.array(SalesItemSchema).min(1),
-  bank_amount: z.string().default("0"),
+  bank_amount: z.string().default('0'),
   bank_details: z.string().optional(),
+  // Discount fields — applied to reduce customer balance in the ledger.
+  discount: z.string().default('0'),
+  discount_pure: z.string().default('0'),
+  balance_mode: z.enum(['PURE', 'CASH']).default('PURE'),
+  rate_for_balance: z.string().optional(),
+  // TDS/TCS — tax withholding adjustments that affect the running balance.
+  tds_enabled: z.boolean().default(false),
+  tds_amount: z.string().default('0'),
+  tcs_enabled: z.boolean().default(false),
+  tcs_amount: z.string().default('0'),
 });
 
 export const UpdateSalesSchema = CreateSalesSchema.extend({

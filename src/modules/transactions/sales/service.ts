@@ -162,6 +162,17 @@ export async function createSale(
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, input.account_id, "SALE");
 
     // Step 7 — Build entries and write to ledger (lock still held)
+    // ── Discount calculation ────────────────────────────────────────────────
+    // Discounts reduce the customer's payable balance. We write a RUPEE entry
+    // FROM the shop TO the customer (the shop "gives back" money) so that
+    // getAggregateBalances subtracts it correctly via the payment-pure formula.
+    const rateNum = toDecimal(input.rate_per_gram);
+    const discountCash = toDecimal(input.discount ?? "0");
+    // discount_pure is in grams; convert to cash at bill rate for ledger entry.
+    const discountPureGrams = toDecimal(input.discount_pure ?? "0");
+    const discountPureAsCash = rateNum.gt(0) ? discountPureGrams.times(rateNum) : toDecimal("0");
+    const totalDiscountCash = discountCash.plus(discountPureAsCash);
+
     const entryInputs = [
       ...processedItems.map((item) => ({
         fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
@@ -182,6 +193,45 @@ export async function createSale(
               itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
               quantity: input.bank_amount,
               remarks: input.bank_details,
+            },
+          ]
+        : []),
+      // Discount — shop returns cash to the customer (reduces their payable balance).
+      // Recorded as SHOP → CUSTOMER RUPEE flow so it's subtracted in payment-pure calc.
+      ...(totalDiscountCash.gt(0)
+        ? [
+            {
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: input.account_id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: totalDiscountCash.toFixed(2),
+              remarks: "Discount",
+            },
+          ]
+        : []),
+      // TDS — shop deducts TDS from the customer's payable (reduces customer's balance).
+      // SHOP → CUSTOMER: reduces customer's net payable (equivalent to the shop absorbing TDS).
+      ...(input.tds_enabled && toDecimal(input.tds_amount ?? "0").gt(0)
+        ? [
+            {
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: input.account_id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: toDecimal(input.tds_amount!).toFixed(2),
+              remarks: "TDS Adjustment",
+            },
+          ]
+        : []),
+      // TCS — customer pays extra TCS to the shop (increases customer's payable).
+      // CUSTOMER → SHOP: increases customer's net payable.
+      ...(input.tcs_enabled && toDecimal(input.tcs_amount ?? "0").gt(0)
+        ? [
+            {
+              fromAccountId: input.account_id,
+              toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: toDecimal(input.tcs_amount!).toFixed(2),
+              remarks: "TCS Adjustment",
             },
           ]
         : []),

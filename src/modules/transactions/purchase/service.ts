@@ -114,18 +114,16 @@ export async function createPurchase(
   // ── Settle-to-zero enforcement ──────────────────────────────────────────────
   // Every purchase bill must be fully settled on the spot.
   // totalPureValue * rate - bankAmount - discount must be ≈ 0.
-  const rate = parseFloat(input.rate_per_gram || '0');
+  const rate = toDecimal(input.rate_per_gram || '0');
   const totalPureValue = allItems.reduce((sum, item) => {
-    const weight = parseFloat(item.quantity || '0');
-    const purity = parseFloat(item.purity || '0');
-    return sum + weight * purity;
-  }, 0);
-  const totalCashValue = totalPureValue * rate;
-  const bankAmount = parseFloat(input.bank_amount || '0');
-  const discount = parseFloat(input.discount || '0');
-  const remainingBalance = totalCashValue - bankAmount - discount;
+    return sum.plus(calcPure(item.quantity, item.purity));
+  }, toDecimal(0));
+  const totalCashValue = totalPureValue.mul(rate);
+  const bankAmount = toDecimal(input.bank_amount || '0');
+  const discount = toDecimal(input.discount || '0');
+  const remainingBalance = totalCashValue.minus(bankAmount).minus(discount);
 
-  if (Math.abs(remainingBalance) > 0.01) {
+  if (remainingBalance.abs().gt(0.01)) {
     throw new AppError(
       "VALIDATION_ERROR",
       `Purchase bill must be fully settled. Remaining balance: ₹${remainingBalance.toFixed(2)}. Adjust Bank amount or Discount.`
