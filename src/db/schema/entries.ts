@@ -44,6 +44,7 @@ export const entries = pgTable("entries", {
   // Financial fields — NUMERIC(20,2)
   rate: numeric("rate", { precision: 20, scale: 2 }),
   amount: numeric("amount", { precision: 20, scale: 2 }),
+  average_touch: numeric("average_touch", { precision: 20, scale: 8 }),
   remarks: text("remarks"),
   created_at: timestamp("created_at", { withTimezone: true })
     .defaultNow()

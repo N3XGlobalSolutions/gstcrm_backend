@@ -116,6 +116,7 @@ async function getGoldStock(input: { page: number; limit: number }) {
         lot_id: lot.lot_id,
         balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
         purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
+        average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
         pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
         created_at: lot.created_at,
       });
@@ -143,11 +144,14 @@ async function getOrnamentStock(input: { page: number; limit: number }) {
     for (const lot of lots) {
       const qty = Number(lot.quantity);
       const pur = lot.purity ? Number(lot.purity) : null;
+      const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
       flatLots.push({
         item,
         lot_id: lot.lot_id,
         balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
         purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
+        average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
+        pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
         created_at: lot.created_at,
       });
     }
@@ -187,6 +191,7 @@ async function getMcGoldStock() {
           lot_id: lot.lot_id,
           balance: lot.quantity.toFixed(8),
           purity: lot.purity?.toFixed(8),
+          average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (lot.purity ? lot.purity.toFixed(8) : undefined),
           pure_balance: lot.pure_quantity?.toFixed(8),
           created_at: lot.created_at,
         });
@@ -428,7 +433,7 @@ async function getProfitLossStock(input: { page: number; limit: number }) {
   const mapped = data.map((row) => {
     const isPurchase = row.group.type === "PURCHASE";
     const quantity = toDecimal(row.entry.quantity);
-    const purity = toDecimal(row.entry.purity || "1.0");
+    const purity = toDecimal(row.entry.average_touch || row.entry.purity || "0");
     const pure = toDecimal(row.entry.pure_quantity || "0");
     const rate = toDecimal(row.entry.rate || row.group.rate_per_gram || "0");
     const total = pure.mul(rate);
@@ -490,6 +495,7 @@ async function getExportData() {
         "Gold Type": item.name,
         "Weight (g)": Number(lot.quantity.toFixed(3)),
         "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+        "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
         "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
         "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
       });
@@ -512,6 +518,8 @@ async function getExportData() {
         "Ornament Type": item.name,
         "Weight (g)": Number(lot.quantity.toFixed(3)),
         "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+        "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
+        "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
         "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
       });
     }
@@ -525,6 +533,7 @@ async function getExportData() {
     "Gold Type": row.item.name,
     "Weight (g)": Number(Number(row.balance).toFixed(3)),
     "Touch %": row.purity ? Number(Number(row.purity).toFixed(2)) : 0,
+    "Avg. Touch %": row.average_touch ? Number(Number(row.average_touch).toFixed(2)) : (row.purity ? Number(Number(row.purity).toFixed(2)) : 0),
     "Pure Weight (g)": row.pure_balance ? Number(Number(row.pure_balance).toFixed(3)) : 0,
     "Date Added": new Date(row.created_at).toLocaleDateString("en-IN"),
   }));
@@ -551,7 +560,7 @@ async function getExportData() {
   const profitLossLots = profitLossData.map((row, index) => {
     const isPurchase = row.group.type === "PURCHASE";
     const quantity = toDecimal(row.entry.quantity);
-    const purity = toDecimal(row.entry.purity || "1.0");
+    const purity = toDecimal(row.entry.average_touch || row.entry.purity || "0");
     const pure = toDecimal(row.entry.pure_quantity || "0");
     const rate = toDecimal(row.entry.rate || row.group.rate_per_gram || "0");
     const total = pure.mul(rate);

@@ -9,6 +9,7 @@ import { createItem } from "@/modules/items/service";
 import { createAccount } from "@/modules/accounts/service";
 import { createPurchase } from "@/modules/transactions/purchase/service";
 import { createSale } from "@/modules/transactions/sales/service";
+import { CreateSalesSchema } from "@/modules/transactions/sales/schema";
 import { createExpense } from "@/modules/transactions/expense/service";
 import { getBalance } from "@/lib/balance";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
@@ -53,6 +54,7 @@ async function run() {
       gold_items: [{ item_id: goldItem.id, quantity: "200.00000000", purity: "91.60" }],
       ornament_items: [],
       bank_amount: "50000.00",
+      discount: "1049200.00",
     });
   } catch (e) { return fail("createPurchase threw", e); }
 
@@ -75,13 +77,13 @@ async function run() {
   // ── Test 2: Sale — insufficient stock should fail ─────────────────────────
   console.log("\n📋 Test 2: transactions.sales.create — insufficient stock guard");
   try {
-    await createSale({
+    await createSale(CreateSalesSchema.parse({
       account_id: customer.id,
       date: "2026-03-24",
       rate_per_gram: "6500",
       items: [{ item_id: goldItem.id, lot_id: lotId!, quantity: "999.00000000", purity: "91.60", wastage_mode: "GRAM", wastage_value: "0" }],
       bank_amount: "0",
-    }, creator);
+    }), creator);
     fail("should have thrown BUSINESS_RULE_VIOLATION");
   } catch (e: any) {
     assert(e?.code === "BUSINESS_RULE_VIOLATION", "BUSINESS_RULE_VIOLATION on insufficient stock", e?.message);
@@ -91,13 +93,13 @@ async function run() {
   console.log("\n📋 Test 3: transactions.sales.create — within stock");
   let sale: Awaited<ReturnType<typeof createSale>>;
   try {
-    sale = await createSale({
+    sale = await createSale(CreateSalesSchema.parse({
       account_id: customer.id,
       date: "2026-03-24",
       rate_per_gram: "6500",
       items: [{ item_id: goldItem.id, lot_id: lotId!, quantity: "50.00000000", purity: "91.60", wastage_mode: "GRAM", wastage_value: "0.05" }],
       bank_amount: "10000.00",
-    }, creator);
+    }), creator);
   } catch (e) { return fail("createSale threw", e); }
 
   // total dispatched = 50 + (50 × 0.05) = 50 + 2.5 = 52.5g

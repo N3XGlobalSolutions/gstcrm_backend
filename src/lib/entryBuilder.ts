@@ -13,6 +13,7 @@ import {
   calcWastageGram,
   toQuantityString,
   toAmountString,
+  toDecimal,
 } from "./decimal";
 import { generateEntryGroupNo, generateLotId } from "./entryNoGenerator";
 import { generateBillNo } from "./transactionQueries";
@@ -144,6 +145,17 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         }
       }
 
+      // Compute average touch for the entry
+      let averageTouch: string | undefined;
+      if (pureQuantity && entry.quantity) {
+        const qty = toDecimal(entry.quantity);
+        const wQty = wastageQuantity ? toDecimal(wastageQuantity) : toDecimal("0");
+        const origWeight = qty.minus(wQty);
+        if (origWeight.gt(0)) {
+          averageTouch = toQuantityString(toDecimal(pureQuantity).div(origWeight).mul(100));
+        }
+      }
+
       // Generate or assign lotId
       let finalLotId = entry.lotId;
       if (!finalLotId) {
@@ -181,6 +193,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
           wastage_quantity: wastageQuantity,
           rate: entry.rate,
           amount: entry.amount,
+          average_touch: averageTouch,
           remarks: entry.remarks,
         })
         .returning();

@@ -201,6 +201,7 @@ export interface LotBalance {
   lot_id: string;
   quantity: Decimal;
   purity: Decimal | null;
+  average_touch: Decimal | null;
   pure_quantity: Decimal | null;
   created_at: Date;
 }
@@ -222,6 +223,7 @@ export async function getLotBalances(
     lot_id: string;
     net_quantity: string;
     purity: string | null;
+    average_touch: string | null;
     net_pure_quantity: string | null;
     created_at: Date;
   }>(sql`
@@ -229,6 +231,7 @@ export async function getLotBalances(
       lot_id,
       SUM(CASE WHEN to_account_id = ${accountId} THEN quantity ELSE -quantity END)::text AS net_quantity,
       MAX(purity)::text AS purity,
+      MAX(average_touch)::text AS average_touch,
       SUM(CASE WHEN to_account_id = ${accountId} THEN pure_quantity ELSE -pure_quantity END)::text AS net_pure_quantity,
       MIN(created_at) AS created_at
     FROM ${entries}
@@ -245,6 +248,7 @@ export async function getLotBalances(
     lot_id: row.lot_id,
     quantity: toDecimal(row.net_quantity),
     purity: row.purity ? toDecimal(row.purity) : null,
+    average_touch: row.average_touch ? toDecimal(row.average_touch) : null,
     pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity) : null,
     created_at: new Date(row.created_at),
   }));
