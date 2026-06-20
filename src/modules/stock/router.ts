@@ -42,7 +42,8 @@ async function getSummary() {
   for (const itemId of goldItemIds) {
     const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, itemId);
     for (const lot of lots) {
-      gold_total_pure = gold_total_pure.plus(lot.pure_quantity ?? zero);
+      const pq = lot.pure_quantity ?? zero;
+      if (isFinite(Number(pq))) gold_total_pure = gold_total_pure.plus(pq);
     }
   }
 
@@ -52,7 +53,8 @@ async function getSummary() {
     for (const itemId of goldItemIds) {
       const lots = await getLotBalances(g.id, itemId);
       for (const lot of lots) {
-        mc_gold_total = mc_gold_total.plus(lot.pure_quantity ?? zero);
+        const pq = lot.pure_quantity ?? zero;
+        if (isFinite(Number(pq))) mc_gold_total = mc_gold_total.plus(pq);
       }
     }
   }
@@ -106,18 +108,22 @@ async function getGoldStock(input: { page: number; limit: number }) {
   for (const item of goldItems) {
     const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
     for (const lot of lots) {
+      const qty = Number(lot.quantity);
+      const pur = lot.purity ? Number(lot.purity) : null;
+      const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
       flatLots.push({
         item,
         lot_id: lot.lot_id,
-        balance: lot.quantity.toFixed(8),
-        purity: lot.purity?.toFixed(8),
-        pure_balance: lot.pure_quantity?.toFixed(8),
+        balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
+        purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
+        pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
         created_at: lot.created_at,
       });
     }
   }
 
-  flatLots.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+  // Newest purchases first — so page 1 always shows the latest stock
+  flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
   const offset = (input.page - 1) * input.limit;
   return { data: flatLots.slice(offset, offset + input.limit), total: flatLots.length };
 }
@@ -135,17 +141,20 @@ async function getOrnamentStock(input: { page: number; limit: number }) {
   for (const item of ornamentItems) {
     const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
     for (const lot of lots) {
+      const qty = Number(lot.quantity);
+      const pur = lot.purity ? Number(lot.purity) : null;
       flatLots.push({
         item,
         lot_id: lot.lot_id,
-        balance: lot.quantity.toFixed(8),
-        purity: lot.purity?.toFixed(8),
+        balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
+        purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
         created_at: lot.created_at,
       });
     }
   }
 
-  flatLots.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+  // Newest purchases first — so page 1 always shows the latest stock
+  flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
   const offset = (input.page - 1) * input.limit;
   return { data: flatLots.slice(offset, offset + input.limit), total: flatLots.length };
 }
