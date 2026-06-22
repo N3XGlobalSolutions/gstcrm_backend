@@ -123,12 +123,15 @@ export async function createLabourBill(
       const activeLot = lots.find((l) => l.lot_id === item.lot_id);
       const available = activeLot?.quantity ?? toDecimal("0");
 
+      // Sign convention allows negative stock for goldsmith issues: if stock is 0/insufficient we can give gold
+      /*
       if (available.lt(toDecimal(item.quantity))) {
         throw new AppError(
           "BUSINESS_RULE_VIOLATION",
           `Insufficient stock for gold issue item ${item.item_id} in lot ${item.lot_id}`,
         );
       }
+      */
     }
 
     entries.push({
@@ -150,12 +153,15 @@ export async function createLabourBill(
       const activeLot = lots.find((l) => l.lot_id === item.lot_id);
       const available = activeLot?.quantity ?? toDecimal("0");
 
+      // Sign convention allows negative stock for goldsmith issues: if stock is 0/insufficient we can give gold
+      /*
       if (available.lt(toDecimal(grossWeight))) {
         throw new AppError(
           "BUSINESS_RULE_VIOLATION",
           `Insufficient stock for ornament issue item ${item.item_id} in lot ${item.lot_id}`,
         );
       }
+      */
     }
 
     entries.push({

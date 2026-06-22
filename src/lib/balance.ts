@@ -240,7 +240,7 @@ export async function getLotBalances(
       AND (to_account_id = ${accountId} OR from_account_id = ${accountId})
       ${dateFilter}
     GROUP BY lot_id
-    HAVING SUM(CASE WHEN to_account_id = ${accountId} THEN quantity ELSE -quantity END) > 0
+    HAVING SUM(CASE WHEN to_account_id = ${accountId} THEN quantity ELSE -quantity END) != 0
     ORDER BY MIN(created_at) ASC
   `);
 
