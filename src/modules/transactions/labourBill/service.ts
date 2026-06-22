@@ -182,19 +182,32 @@ export async function createLabourBill(
     });
   }
 
-  // ── 4. Ornament Receipt: Goldsmith → SHOP (with wastage) ───────────────────
+  // ── 4. Ornament Receipt: Goldsmith → SHOP ──────────────────────────────────
+  // KEY DESIGN: The physical ornament weight (item.quantity) is stored as the
+  // ledger quantity — this is what appears in the shop's stock lot.
+  // e.g. a 40g ring → stock shows 40g, NOT 43.556g (40g + 3.556g wastage).
+  //
+  // However, the goldsmith's balance must decrease by the FULL gold consumed:
+  //   grossPure = (physicalWeight + wastageGm) × touch%
+  // We pass this as a pureQuantity override so the balance is correct without
+  // inflating the stock lot weight.
+  //
+  // entryBuilder then computes:
+  //   averageTouch = grossPure / physicalWeight × 100  (e.g. 98%)
   for (const item of input.ornament_receipt) {
-    const { grossWeight } = calcOrnamentEntry(item);
+    const { pureQuantity: grossPure } = calcOrnamentEntry(item);
 
     entries.push({
       fromAccountId: input.account_id,
       toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       itemId: item.item_id,
       lotId: item.lot_id,
-      quantity: grossWeight,
+      // Physical weight of the ornament (user entered 40g → stock lot shows 40g)
+      quantity: item.quantity,
       purity: item.purity,
-      wastageMode: "PERCENT",
-      wastageValue: item.wastage_percent,
+      // Override: total pure gold consumed = (physicalWeight + wastageGm) × touch%
+      // Goldsmith's gold balance decreases by this full amount, not just physical × touch%.
+      pureQuantity: grossPure,
     });
   }
 
