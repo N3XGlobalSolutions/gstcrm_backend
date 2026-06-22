@@ -137,9 +137,12 @@ export async function createJobWork(
     const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
     const activeLot = lots.find((l) => l.lot_id === item.lot_id);
     const available = activeLot?.quantity ?? toDecimal("0");
+    // Sign convention allows negative stock for employee issues: if stock is 0/insufficient we can give gold
+    /*
     if (available.lt(toDecimal(item.quantity))) {
       throw new AppError("BUSINESS_RULE_VIOLATION", `Insufficient stock for gold issue item ${item.item_id} in lot ${item.lot_id}`);
     }
+    */
   }
 
   for (const item of input.ornament_issue) {
@@ -148,9 +151,12 @@ export async function createJobWork(
     const activeLot = lots.find((l) => l.lot_id === item.lot_id);
     const available = activeLot?.quantity ?? toDecimal("0");
     const { totalWeightStr } = processOrnamentItem(item);
+    // Sign convention allows negative stock for employee issues: if stock is 0/insufficient we can give gold
+    /*
     if (available.lt(toDecimal(totalWeightStr))) {
       throw new AppError("BUSINESS_RULE_VIOLATION", `Insufficient stock for ornament issue item ${item.item_id} in lot ${item.lot_id}`);
     }
+    */
   }
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
