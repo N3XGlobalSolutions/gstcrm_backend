@@ -31,6 +31,7 @@ export const CreatePurchaseSchema = z.object({
   bank_amount: z.string().default("0"),
   bank_details: z.string().optional(),
   discount: z.string().optional(),
+  discount_pure: z.string().optional(),
 });
 
 export const UpdatePurchaseSchema = CreatePurchaseSchema.extend({

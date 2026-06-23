@@ -1,7 +1,7 @@
 import { AppError } from "@/types/errors";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
-import { calcPure, toQuantityString, toDecimal } from "@/lib/decimal";
+import { toQuantityString, toDecimal } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import { listTransactions, getTransactionById, generateBillNo } from "@/lib/transactionQueries";
 import { db } from "@/db";
@@ -111,27 +111,15 @@ export async function createPurchase(
     throw new AppError("VALIDATION_ERROR", "At least one item is required");
   }
 
-  // ── Settle-to-zero enforcement ──────────────────────────────────────────────
-  // Every purchase bill must be fully settled on the spot.
-  // totalPureValue * rate - bankAmount - discount must be ≈ 0.
-  const rate = toDecimal(input.rate_per_gram || '0');
-  const totalPureValue = allItems.reduce((sum, item) => {
-    return sum.plus(calcPure(item.quantity, item.purity));
-  }, toDecimal(0));
-  const totalCashValue = totalPureValue.mul(rate);
-  const bankAmount = toDecimal(input.bank_amount || '0');
-  const discount = toDecimal(input.discount || '0');
-  const remainingBalance = totalCashValue.minus(bankAmount).minus(discount);
+  // Purchase bills support running balances — no settle-to-zero enforcement.
+  // The purchaser's outstanding balance carries forward just like a sales bill.
+  const rateNum = toDecimal(input.rate_per_gram || '0');
+  const discountCash = toDecimal(input.discount || '0');
+  const discountPureGrams = toDecimal(input.discount_pure || '0');
+  const discountPureAsCash = rateNum.gt(0) ? discountPureGrams.times(rateNum) : toDecimal('0');
+  const totalDiscountCash = discountCash.plus(discountPureAsCash);
 
-  if (remainingBalance.abs().gt(0.01)) {
-    throw new AppError(
-      "VALIDATION_ERROR",
-      `Purchase bill must be fully settled. Remaining balance: ₹${remainingBalance.toFixed(2)}. Adjust Bank amount or Discount.`
-    );
-  }
-  // ───────────────────────────────────────────────────────────────────────────
-
-  // Step 6 — Build entries (from: supplier → SHOP for goods; SHOP → supplier for cash)
+  // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [
     ...input.gold_items.map((item) => ({
       fromAccountId: input.account_id,
@@ -147,7 +135,7 @@ export async function createPurchase(
       quantity: item.quantity,
       purity: item.purity,
     })),
-    // Money paid to supplier (shop pays out)
+    // Money paid to supplier (shop pays out cash)
     ...(toDecimal(input.bank_amount).gt(0)
       ? [
           {
@@ -156,6 +144,19 @@ export async function createPurchase(
             itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
             quantity: input.bank_amount,
             remarks: input.bank_details,
+          },
+        ]
+      : []),
+    // Discount — shop deducts from what it owes the supplier.
+    // SUPPLIER → SHOP: reduces shop's outstanding payable to supplier.
+    ...(totalDiscountCash.gt(0)
+      ? [
+          {
+            fromAccountId: input.account_id,
+            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+            quantity: totalDiscountCash.toFixed(2),
+            remarks: 'Discount',
           },
         ]
       : []),

@@ -36,42 +36,19 @@ async function run() {
   }, creator);
   console.log(`✅ Created test supplier: "${supplier.name}" (ID: ${supplier.id})`);
 
-  // Step 1: Verify settle-to-zero enforcement
-  console.log("\n1️⃣  Testing settle-to-zero validation...");
+  // Step 1: Verify running balance purchase creation
+  console.log("\n1️⃣  Testing running balance purchase creation (partial payment)...");
   
   // Math: 10g weight, 99.00% touch = 9.9g pure weight.
   // 9.9g pure * 5000 rate = 49500 cash value.
-  // We pay 40000. Balance of 9500 remains, which is NOT settled.
-  try {
-    await createPurchase({
-      account_id: supplier.id,
-      date: "2026-06-20",
-      rate_per_gram: "5000",
-      gold_items: [{ item_id: goldItem.id, quantity: "10.000", purity: "99.00" }],
-      ornament_items: [],
-      bank_amount: "40000.00",
-      discount: "0.00",
-    });
-    console.error("❌ Fail: Allowed purchase transaction to save without settling balance to zero!");
-    process.exit(1);
-  } catch (error: any) {
-    if (error.message && error.message.includes("must be fully settled")) {
-      console.log("✅ Success: Settle-to-zero validation triggered correctly! Error message:", error.message);
-    } else {
-      console.error("❌ Fail: Unexpected error thrown during settle-to-zero test:", error);
-      process.exit(1);
-    }
-  }
-
-  // Step 2: Create a purchase that is fully settled (Bank Paid = Cash Value)
-  console.log("\n2️⃣  Creating a fully-settled purchase...");
+  // We pay 40000. Balance of 9500 (1.9g) remains, which is NOT settled.
   const purchase = await createPurchase({
     account_id: supplier.id,
     date: "2026-06-20",
     rate_per_gram: "5000",
     gold_items: [{ item_id: goldItem.id, quantity: "10.000", purity: "99.00" }],
     ornament_items: [],
-    bank_amount: "49500.00", // Exactly settles 9.9g * 5000
+    bank_amount: "40000.00",
     discount: "0.00",
   });
   console.log(`✅ Success: Purchase created with group ID: ${purchase.group.id}`);
