@@ -26,6 +26,7 @@ import bcrypt from "bcryptjs";
 import { env } from "@/config/env";
 import { generateEntryNo as genNo } from "@/lib/entryNoGenerator";
 import { createSystemNotification } from "@/modules/notifications/service";
+import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
@@ -322,6 +323,132 @@ const backupRouter = router({
 
       // Return the encrypted dump payload
       return { success: true, filename, data: payload };
+    }),
+
+  factoryReset: superadminProcedure
+    .input(z.object({ keyword: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      // 1. Verify Security Keyword
+      if (input.keyword !== "goldcrmbyn3x") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Invalid security keyword. Factory reset denied.",
+        });
+      }
+
+      console.log(`🧹 Factory reset initiated by user '${ctx.user.username}'`);
+
+      // 2. Perform factory reset inside a database transaction
+      await db.transaction(async (tx) => {
+        // List of transactional and logs tables to wipe completely
+        const tablesToWipe = [
+          "entries",
+          "entry_groups",
+          "gst_sales_history",
+          "gst_purchase_history",
+          "print_templates",
+          "tax_master",
+          "notifications",
+          "login_attempts",
+          "refresh_tokens"
+        ];
+
+        for (const table of tablesToWipe) {
+          await tx.execute(sql.raw(`TRUNCATE TABLE "${table}" RESTART IDENTITY CASCADE`));
+          console.log(`✅ Table truncated: ${table}`);
+        }
+
+        // Delete all items EXCEPT the system RUPEE item
+        await tx.execute(
+          sql`DELETE FROM items WHERE id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}`
+        );
+        console.log(`✅ Custom items deleted`);
+
+        // Delete all accounts EXCEPT system accounts
+        const systemAccountIds = [
+          SYSTEM_ACCOUNTS.SHOP_ID,
+          SYSTEM_ACCOUNTS.CASH_ID,
+          SYSTEM_ACCOUNTS.BANK_ID,
+          SYSTEM_ACCOUNTS.LOSS_ID,
+          SYSTEM_ACCOUNTS.EXPENSE_ID,
+          SYSTEM_ACCOUNTS.OPENING_STOCK_ID
+        ];
+        await tx.execute(
+          sql`DELETE FROM accounts WHERE id NOT IN (${sql.join(
+            systemAccountIds.map(id => sql`${id}`),
+            sql`, `
+          )})`
+        );
+        console.log(`✅ Custom accounts deleted`);
+
+        // Clear permissions tables before deleting users to prevent constraints violations
+        await tx.execute(sql`TRUNCATE TABLE "user_form_permissions" CASCADE`);
+        await tx.execute(sql`TRUNCATE TABLE "user_activity_permissions" CASCADE`);
+
+        // Delete all users except superadmin
+        await tx.execute(
+          sql`DELETE FROM app_users WHERE username != 'superadmin'`
+        );
+        console.log(`✅ Custom users deleted`);
+
+        // Re-seed permissions for the superadmin user
+        const adminUsers = await tx
+          .select({ id: appUsers.id })
+          .from(appUsers)
+          .where(eq(appUsers.username, "superadmin"))
+          .limit(1);
+
+        const adminUserId = adminUsers[0]?.id;
+        if (adminUserId) {
+          const MODULES_FORMS = [
+            { module: "dashboard", form_name: "dashboard" },
+            { module: "notifications", form_name: "notifications" },
+            { module: "items", form_name: "items" },
+            { module: "accounts", form_name: "accounts" },
+            { module: "transactions", form_name: "purchase" },
+            { module: "transactions", form_name: "sales" },
+            { module: "transactions", form_name: "labourBill" },
+            { module: "transactions", form_name: "jobWork" },
+            { module: "stock", form_name: "stock" },
+            { module: "expense", form_name: "expense" },
+            { module: "settings", form_name: "users" },
+            { module: "settings", form_name: "permissions" },
+            { module: "settings", form_name: "backup" },
+            { module: "settings", form_name: "company" },
+          ];
+
+          await tx.insert(userFormPermissions).values(
+            MODULES_FORMS.map((perm) => ({
+              user_id: adminUserId,
+              module: perm.module,
+              form_name: perm.form_name,
+              allowed: true,
+            }))
+          );
+
+          await tx.insert(userActivityPermissions).values({
+            user_id: adminUserId,
+            can_view: true,
+            can_edit: true,
+            can_delete: true,
+          });
+          console.log(`✅ Superadmin permissions seeded`);
+        }
+
+        // Wipe company details and re-insert default
+        await tx.execute(sql`TRUNCATE TABLE "company_details" RESTART IDENTITY CASCADE`);
+        await tx.insert(companyDetails).values({
+          company_name: "Gold Jewellers",
+          address: "",
+          phone: "",
+          email: "",
+          gst_no: "",
+          pan_no: "",
+        });
+        console.log(`✅ Company details reset`);
+      });
+
+      return { success: true };
     }),
 });
 

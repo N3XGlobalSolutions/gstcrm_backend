@@ -78,7 +78,7 @@ async function seed() {
     if (existing.length === 0) {
       await db.insert(accounts).values({
         id: acc.id,
-        entry_no: i + 1,
+        entry_no: 1000000 + i + 1,
         name: acc.name,
         type: acc.type,
         is_system_account: true,
@@ -99,7 +99,7 @@ async function seed() {
   if (existingRupee.length === 0) {
     await db.insert(items).values({
       id: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-      entry_no: 1,
+      entry_no: 1000001,
       name: "Rupee",
       type: "MONEY",
       unit: "RUPEE",

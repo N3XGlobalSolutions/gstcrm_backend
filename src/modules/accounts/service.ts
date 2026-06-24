@@ -43,7 +43,7 @@ export async function createAccount(
   // balance entries, and sequence generation are all atomic.
   const account = await db.transaction(async (tx) => {
     // Step 1: Generate entry_no inside the transaction (advisory lock is effective here)
-    const entry_no = await generateEntryNo(tx as any, "accounts");
+    const entry_no = await generateEntryNo(tx as any, "accounts", input.type);
 
     const newAccount = await insertAccount(tx as any, {
       entry_no,
@@ -258,6 +258,6 @@ export async function getAccountById(id: string) {
   return findAccountById(id);
 }
 
-export async function getNextEntryNo() {
-  return { nextEntryNo: await getNextAccountEntryNo() };
+export async function getNextEntryNo(type?: string) {
+  return { nextEntryNo: await getNextAccountEntryNo(type) };
 }

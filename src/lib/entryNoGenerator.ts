@@ -14,16 +14,33 @@ type DbOrTx = Parameters<Parameters<Database["transaction"]>[0]>[0] | Database;
 export async function generateEntryNo(
   tx: DbOrTx,
   tableName: string,
+  type?: string,
 ): Promise<number> {
   // Use sql template literal for safer execution of raw PG advisory lock queries.
+  const lockKey = type ? `${tableName}_${type}` : tableName;
   await (tx as Database).execute(
-    sql`SELECT pg_advisory_xact_lock(hashtext(${"entry_no_" + tableName}))`,
+    sql`SELECT pg_advisory_xact_lock(hashtext(${"entry_no_" + lockKey}))`,
   );
 
+  let query;
+  if (tableName === "accounts") {
+    if (type) {
+      query = sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM accounts WHERE type = ${type} AND is_system_account = false`;
+    } else {
+      query = sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM accounts WHERE is_system_account = false`;
+    }
+  } else if (tableName === "items") {
+    if (type) {
+      query = sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM items WHERE type = ${type}`;
+    } else {
+      query = sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM items WHERE type != 'MONEY'`;
+    }
+  } else {
+    query = sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM ${sql.identifier(tableName)}`;
+  }
+
   // Use sql template literal for safe parameterized schema identification.
-  const result = await (tx as Database).execute(
-    sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM ${sql.identifier(tableName)}`,
-  );
+  const result = await (tx as Database).execute(query);
 
   const rows = result as unknown as Array<{ next_entry_no: string | null }>;
   return Number(rows[0]?.next_entry_no ?? 1);

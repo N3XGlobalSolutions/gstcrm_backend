@@ -36,7 +36,7 @@ async function findOrCreateExpenseAccount(name: string): Promise<string> {
   if (existing) return existing.id;
 
   // Create a new EXPENSE account
-  const entry_no = await generateEntryNo(db, "accounts");
+  const entry_no = await generateEntryNo(db, "accounts", "EXPENSE");
   const [created] = await db
     .insert(accounts)
     .values({ entry_no, name, type: "EXPENSE" })

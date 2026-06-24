@@ -49,6 +49,7 @@ export const accountsRouter = router({
     .query(async ({ input }) => getAccountById(input.id)),
 
   getNextEntryNo: protectedProcedure
-    .query(async () => getNextEntryNo()),
+    .input(z.object({ type: z.string().optional() }).optional())
+    .query(async ({ input }) => getNextEntryNo(input?.type)),
 });
 

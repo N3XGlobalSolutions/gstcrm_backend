@@ -91,12 +91,17 @@ export async function softDeleteAccount(id: string) {
 }
 
 // ─── getNextAccountEntryNo ───────────────────────────────────────────────────
-// Returns MAX(entry_no) + 1 across ALL accounts (including system accounts,
-// all types, and soft-deleted rows) so the form preview is always accurate.
+// Returns MAX(entry_no) + 1 across ALL custom/non-system accounts (including soft-deleted rows)
+// so the form preview is always accurate.
 
-export async function getNextAccountEntryNo(): Promise<number> {
+export async function getNextAccountEntryNo(type?: string): Promise<number> {
+  const conditions = [eq(accounts.is_system_account, false)];
+  if (type) {
+    conditions.push(eq(accounts.type, type as any));
+  }
   const [row] = await db
     .select({ maxNo: max(accounts.entry_no) })
-    .from(accounts);
+    .from(accounts)
+    .where(and(...conditions));
   return (row?.maxNo ?? 0) + 1;
 }

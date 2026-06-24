@@ -57,6 +57,13 @@
       "when": 1782211877914,
       "tag": "0007_clammy_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782292278706,
+      "tag": "0008_narrow_vision",
+      "breakpoints": true
     }
   ]
 }

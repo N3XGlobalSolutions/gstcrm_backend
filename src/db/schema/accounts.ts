@@ -8,6 +8,7 @@ import {
   boolean,
   numeric,
   pgEnum,
+  unique,
 } from "drizzle-orm/pg-core";
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
@@ -35,7 +36,7 @@ export const customerTypeEnum = pgEnum("customer_type", [
 
 export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
-  entry_no: integer("entry_no").unique().notNull(),
+  entry_no: integer("entry_no").notNull(),
   name: varchar("name", { length: 200 }).notNull(),
   type: accountTypeEnum("type").notNull(),
   customer_type: customerTypeEnum("customer_type"),
@@ -68,4 +69,6 @@ export const accounts = pgTable("accounts", {
   updated_at: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
-});
+}, (table) => [
+  unique("accounts_type_entry_no_unique").on(table.type, table.entry_no),
+]);

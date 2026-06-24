@@ -37,7 +37,7 @@ export async function createItem(input: z.infer<typeof CreateItemSchema>) {
     );
   }
 
-  const entry_no = await generateEntryNo(db, "items");
+  const entry_no = await generateEntryNo(db, "items", input.type);
   return insertItem({ ...input, entry_no });
 }
 

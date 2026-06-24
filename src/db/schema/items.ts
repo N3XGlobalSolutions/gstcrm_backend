@@ -6,6 +6,7 @@ import {
   timestamp,
   boolean,
   pgEnum,
+  unique,
 } from "drizzle-orm/pg-core";
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ export const itemUnitEnum = pgEnum("item_unit", ["GRAM", "PIECE", "RUPEE"]);
 
 export const items = pgTable("items", {
   id: uuid("id").primaryKey().defaultRandom(),
-  entry_no: integer("entry_no").unique().notNull(),
+  entry_no: integer("entry_no").notNull(),
   name: varchar("name", { length: 100 }).notNull(),
   type: itemTypeEnum("type").notNull(),
   unit: itemUnitEnum("unit").notNull(),
@@ -28,4 +29,6 @@ export const items = pgTable("items", {
   updated_at: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
-});
+}, (table) => [
+  unique("items_type_entry_no_unique").on(table.type, table.entry_no),
+]);
