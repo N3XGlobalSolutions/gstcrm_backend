@@ -1,4 +1,8 @@
 import { router, guardedProcedure } from "@/lib/trpc";
+import { z } from "zod";
+import { db } from "@/db";
+import { sql } from "drizzle-orm";
+import { generateBillNo } from "@/lib/transactionQueries";
 import {
   ListTxSchema,
   GetByIdSchema,
@@ -22,6 +26,16 @@ export const salesRouter = router({
   list: guardedProcedure("sales", "sales", "view").input(ListTxSchema).query(async ({ input }) => listSales(input)),
   listGSTHistory: guardedProcedure("sales", "sales", "view").input(ListTxSchema).query(async ({ input }) => listGSTHistory(input)),
   getById: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getSaleById(input)),
+  getNextNumbers: guardedProcedure("sales", "sales", "view").input(z.object({ accountId: z.string().uuid().optional().nullable() })).query(async ({ input }) => {
+    const res = await db.execute(sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM entry_groups WHERE type = 'SALE'`);
+    const nextEntryNo = Number(res[0]?.next_entry_no || 1);
+    let nextBillNo = "";
+    if (input.accountId) {
+      const generated = await generateBillNo(db, input.accountId, "SALE");
+      nextBillNo = String(generated);
+    }
+    return { entryNo: String(nextEntryNo), billNo: nextBillNo };
+  }),
   create: guardedProcedure("sales", "sales", "edit").input(CreateSalesSchema).mutation(async ({ input, ctx }) => createSale(input, ctx.user!)),
   update: guardedProcedure("sales", "sales", "edit").input(UpdateSalesSchema).mutation(async ({ input, ctx }) => updateSale(input, ctx.user!)),
   delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(async ({ input, ctx }) => deleteSale(input, ctx.user!)),
