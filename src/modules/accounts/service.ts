@@ -22,6 +22,7 @@ import {
   insertAccount,
   updateAccount,
   softDeleteAccount,
+  getNextAccountEntryNo,
 } from "./queries";
 import { entryGroups } from "@/db/schema";
 import { eq, and, isNotNull, desc, not } from "drizzle-orm";
@@ -38,77 +39,92 @@ export async function createAccount(
   input: z.infer<typeof CreateAccountSchema>,
   creator: { id: string; username: string }
 ) {
-  // Step 1: Insert the account row (committed immediately so FK on entry_groups works)
-  const entry_no = await generateEntryNo(db, "accounts");
+  // Wrap the whole creation in a single transaction so account insert, opening
+  // balance entries, and sequence generation are all atomic.
+  const account = await db.transaction(async (tx) => {
+    // Step 1: Generate entry_no inside the transaction (advisory lock is effective here)
+    const entry_no = await generateEntryNo(tx as any, "accounts");
 
-  const account = await insertAccount(db as any, {
-    entry_no,
-    name: input.name,
-    type: input.type,
-    customer_type: input.customer_type ?? null,
-    gst_no: input.gst_no ?? null,
-    pan_no: input.pan_no ?? null,
-    state_code: input.state_code ?? null,
-    place_of_supply: input.place_of_supply ?? null,
-    address: input.address ?? null,
-    phone: input.phone ?? null,
-    email: input.email ?? null,
-    website: input.website ?? null,
-    opening_pure_balance: input.opening_pure_balance,
-    opening_cash_balance: input.opening_cash_balance,
+    const newAccount = await insertAccount(tx as any, {
+      entry_no,
+      name: input.name,
+      type: input.type,
+      customer_type: input.customer_type ?? null,
+      gst_no: input.gst_no ?? null,
+      pan_no: input.pan_no ?? null,
+      state_code: input.state_code ?? null,
+      place_of_supply: input.place_of_supply ?? null,
+      address: input.address ?? null,
+      phone: input.phone ?? null,
+      email: input.email ?? null,
+      website: input.website ?? null,
+      opening_pure_balance: input.opening_pure_balance,
+      opening_cash_balance: input.opening_cash_balance,
+    });
+
+    const today = new Date().toISOString().split("T")[0]!;
+
+    // Step 2: Opening pure balance → OPENING entry: SHOP → new account
+    if (toDecimal(input.opening_pure_balance).gt(0)) {
+      await createEntryGroup(
+        {
+          type: "OPENING",
+          accountId: newAccount.id,
+          date: today,
+          remarks: "Opening pure balance",
+          entries: [
+            {
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: newAccount.id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: "0",
+              pureQuantity: input.opening_pure_balance,
+            },
+          ],
+        },
+        tx as any,
+      );
+    }
+
+    // Step 3: Opening cash balance → OPENING entry: CASH → new account
+    if (toDecimal(input.opening_cash_balance).gt(0)) {
+      await createEntryGroup(
+        {
+          type: "OPENING",
+          accountId: newAccount.id,
+          date: today,
+          remarks: "Opening cash balance",
+          entries: [
+            {
+              fromAccountId: SYSTEM_ACCOUNTS.CASH_ID,
+              toAccountId: newAccount.id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: input.opening_cash_balance,
+            },
+          ],
+        },
+        tx as any,
+      );
+    }
+
+    return newAccount;
   });
 
-  const today = new Date().toISOString().split("T")[0]!;
-
-  // Step 2: Opening pure balance → OPENING entry: SHOP → new account
-  // Stored via pureQuantity (not as a RUPEE quantity) so it accumulates in totalPure
-  // (pure_quantity SUM) rather than totalCash (RUPEE_ITEM_ID quantity SUM).
-  if (toDecimal(input.opening_pure_balance).gt(0)) {
-    await createEntryGroup({
-      type: "OPENING",
-      accountId: account.id,
-      date: today,
-      remarks: "Opening pure balance",
-      entries: [
-        {
-          fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-          toAccountId: account.id,
-          itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-          quantity: "0",
-          pureQuantity: input.opening_pure_balance,
-        },
-      ],
-    });
-  }
-
-  // Step 3: Opening cash balance → OPENING entry: CASH → new account
-  if (toDecimal(input.opening_cash_balance).gt(0)) {
-    await createEntryGroup({
-      type: "OPENING",
-      accountId: account.id,
-      date: today,
-      remarks: "Opening cash balance",
-      entries: [
-        {
-          fromAccountId: SYSTEM_ACCOUNTS.CASH_ID,
-          toAccountId: account.id,
-          itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-          quantity: input.opening_cash_balance,
-        },
-      ],
-    });
-  }
-
+  // Fire system notification AFTER the transaction commits, as a best-effort
+  // side-effect. Never let a notification failure roll back the customer creation.
   if (input.type === "CUSTOMER") {
-    await createSystemNotification(
+    createSystemNotification(
       db,
       `Customer '${account.name}' was created by ${creator.username}`,
       creator.id
+    ).catch((err) =>
+      console.error("Failed to create system notification for new customer:", err)
     );
   }
 
   return account;
 }
+
 
 // ─── updateAccount ────────────────────────────────────────────────────────────
 
@@ -144,10 +160,12 @@ export async function updateAccountById(
   });
 
   if (current.type === "CUSTOMER") {
-    await createSystemNotification(
+    createSystemNotification(
       db,
       `Customer '${input.name}' was updated by ${creator.username}`,
       creator.id
+    ).catch((err) =>
+      console.error("Failed to create system notification for customer update:", err)
     );
   }
 
@@ -181,10 +199,12 @@ export async function deleteAccount(
   await softDeleteAccount(input.id);
 
   if (account.type === "CUSTOMER") {
-    await createSystemNotification(
+    createSystemNotification(
       db,
       `Customer '${account.name}' was deleted by ${creator.username}`,
       creator.id
+    ).catch((err) =>
+      console.error("Failed to create system notification for customer delete:", err)
     );
   }
 
@@ -236,4 +256,8 @@ export async function getAccountAggregateBalances(
 
 export async function getAccountById(id: string) {
   return findAccountById(id);
+}
+
+export async function getNextEntryNo() {
+  return { nextEntryNo: await getNextAccountEntryNo() };
 }

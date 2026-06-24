@@ -3,10 +3,6 @@ import { env } from "@/config/env";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
-import { registerSchema, wrapSql } from "@/lib/cache";
-
-// Register the database schema tables for the cache detector
-registerSchema(schema);
 
 // Extract the hostname from DATABASE_URL for the DNS override
 function getNeonHostname(): string | null {
@@ -65,11 +61,8 @@ const connection = postgres(env.DATABASE_URL, {
   max_lifetime: 60 * 20,
 });
 
-// Wrap connection with caching proxy
-const cachedConnection = wrapSql(connection);
-
 // Create the Drizzle client with the full schema
-export const db = drizzle(cachedConnection, { schema });
+export const db = drizzle(connection, { schema });
 
 // Export schema for direct use in queries
 export { schema };

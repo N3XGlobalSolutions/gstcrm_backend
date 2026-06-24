@@ -15,12 +15,14 @@ export async function generateEntryNo(
   tx: DbOrTx,
   tableName: string,
 ): Promise<number> {
+  // Use sql template literal for safer execution of raw PG advisory lock queries.
   await (tx as Database).execute(
-    sql`SELECT pg_advisory_xact_lock(hashtext('entry_no_' || ${tableName}))`,
+    sql`SELECT pg_advisory_xact_lock(hashtext(${"entry_no_" + tableName}))`,
   );
 
+  // Use sql template literal for safe parameterized schema identification.
   const result = await (tx as Database).execute(
-    `SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM "${tableName}"`,
+    sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM ${sql.identifier(tableName)}`,
   );
 
   const rows = result as unknown as Array<{ next_entry_no: string | null }>;
@@ -43,11 +45,12 @@ export async function generateEntryGroupNo(
   type: string,
 ): Promise<number> {
   await (tx as Database).execute(
-    sql`SELECT pg_advisory_xact_lock(hashtext('entry_group_no_' || ${type}))`,
+    sql`SELECT pg_advisory_xact_lock(hashtext(${"entry_group_no_" + type}))`,
   );
 
+  // Use sql template literal for safe execution of parameterized query.
   const result = await (tx as Database).execute(
-    `SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM entry_groups WHERE type = '${type}'`,
+    sql`SELECT COALESCE(MAX(entry_no), 0) + 1 AS next_entry_no FROM entry_groups WHERE type = ${type}`,
   );
 
   const rows = result as unknown as Array<{ next_entry_no: string | null }>;
@@ -64,11 +67,12 @@ export async function generateEntryGroupNo(
  */
 export async function generateLotId(tx: DbOrTx): Promise<string> {
   await (tx as Database).execute(
-    sql`SELECT pg_advisory_xact_lock(hashtext('lot_id'))`,
+    sql`SELECT pg_advisory_xact_lock(hashtext(${'lot_id'}))`,
   );
 
+  // Use sql template literal for safe execution.
   const result = await (tx as Database).execute(
-    `SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) + 1 AS next_lot_no FROM "entries" WHERE lot_id IS NOT NULL`,
+    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) + 1 AS next_lot_no FROM entries WHERE lot_id IS NOT NULL`,
   );
 
   const rows = result as unknown as Array<{ next_lot_no: string | number | null }>;

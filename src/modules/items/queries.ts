@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { items, entries } from "@/db/schema";
-import { and, eq, ilike, count, sql } from "drizzle-orm";
+import { and, eq, ilike, count, sql, desc } from "drizzle-orm";
 import type { z } from "zod";
 import type { ListItemsSchema } from "./schema";
 
@@ -22,7 +22,7 @@ export async function findManyItems(input: ListInput) {
       .select()
       .from(items)
       .where(where)
-      .orderBy(items.entry_no)
+      .orderBy(desc(items.entry_no))
       .limit(input.limit)
       .offset(offset),
     db.select({ total: count() }).from(items).where(where),

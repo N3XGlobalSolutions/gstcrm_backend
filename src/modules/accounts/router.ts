@@ -16,6 +16,7 @@ import {
   getAccountBalance,
   getAccountAggregateBalances,
   getAccountById,
+  getNextEntryNo,
 } from "./service";
 
 export const accountsRouter = router({
@@ -46,5 +47,8 @@ export const accountsRouter = router({
   getById: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .query(async ({ input }) => getAccountById(input.id)),
+
+  getNextEntryNo: protectedProcedure
+    .query(async () => getNextEntryNo()),
 });
 

@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { accounts, entryGroups } from "@/db/schema";
-import { and, eq, ilike, count, sql } from "drizzle-orm";
+import { and, eq, ilike, count, sql, max, desc } from "drizzle-orm";
 import type { z } from "zod";
 import type { ListAccountsSchema } from "./schema";
 
@@ -24,7 +24,7 @@ export async function findManyAccounts(input: ListInput) {
       .select()
       .from(accounts)
       .where(where)
-      .orderBy(accounts.entry_no)
+      .orderBy(desc(accounts.entry_no))
       .limit(input.limit)
       .offset(offset),
     db.select({ total: count() }).from(accounts).where(where),
@@ -88,4 +88,15 @@ export async function softDeleteAccount(id: string) {
     .update(accounts)
     .set({ is_deleted: true, updated_at: new Date() })
     .where(eq(accounts.id, id));
+}
+
+// ─── getNextAccountEntryNo ───────────────────────────────────────────────────
+// Returns MAX(entry_no) + 1 across ALL accounts (including system accounts,
+// all types, and soft-deleted rows) so the form preview is always accurate.
+
+export async function getNextAccountEntryNo(): Promise<number> {
+  const [row] = await db
+    .select({ maxNo: max(accounts.entry_no) })
+    .from(accounts);
+  return (row?.maxNo ?? 0) + 1;
 }
