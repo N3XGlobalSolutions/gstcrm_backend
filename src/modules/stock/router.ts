@@ -1,7 +1,7 @@
 import { router, protectedProcedure, guardedProcedure } from "@/lib/trpc";
 import { z } from "zod";
-import { getBalances, getLotBalances } from "@/lib/balance";
-import { toDecimal } from "@/lib/decimal";
+import { getBalances, getLotBalances, getAccountLotBalances, getAllGoldsmithsLotBalances } from "@/lib/balance";
+import { toDecimal, type Decimal } from "@/lib/decimal";
 import { db } from "@/db";
 import { items, accounts } from "@/db/schema";
 import { eq, and, or } from "drizzle-orm";
@@ -12,73 +12,87 @@ import { TRPCError } from "@trpc/server";
 // ─── stock.getSummary ─────────────────────────────────────────────────────────
 
 async function getSummary() {
-  const allItems = await db
-    .select({ id: items.id, type: items.type })
-    .from(items)
-    .where(eq(items.is_deleted, false));
+  const [allItems, goldsmiths] = await Promise.all([
+    db
+      .select({ id: items.id, type: items.type })
+      .from(items)
+      .where(eq(items.is_deleted, false)),
+    db
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(
+        and(
+          or(eq(accounts.type, "GOLDSMITH"), eq(accounts.customer_type, "GOLD_SMITH")),
+          eq(accounts.is_deleted, false)
+        )
+      )
+  ]);
 
   const goldItemIds = allItems.filter((i) => i.type === "GOLD").map((i) => i.id);
   const ornamentItemIds = allItems.filter((i) => i.type === "ORNAMENT").map((i) => i.id);
 
-  const goldsmiths = await db
-    .select({ id: accounts.id })
-    .from(accounts)
-    .where(
-      and(
-        or(eq(accounts.type, "GOLDSMITH"), eq(accounts.customer_type, "GOLD_SMITH")),
-        eq(accounts.is_deleted, false)
-      )
-    );
-
   const zero = toDecimal("0");
 
-  // Ornament count: number of distinct lots with a positive balance
-  const shopOrnamentBalances = await getBalances(SYSTEM_ACCOUNTS.SHOP_ID, ornamentItemIds);
-  const ornaments_in_stock = Object.values(shopOrnamentBalances ?? {})
-    .filter((b) => b.gt(0)).length;
+  // Fetch shop stock, goldsmith stock, and profit/loss in parallel
+  const [shopLots, mcLots, profitLossRows] = await Promise.all([
+    getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID),
+    getAllGoldsmithsLotBalances(goldItemIds),
+    (async () => {
+      const { entries: entriesTable, entryGroups } = await import("@/db/schema");
+      const { inArray, sql } = await import("drizzle-orm");
+      return db
+        .select({
+          type: entryGroups.type,
+          pure_quantity: sql<string>`SUM(${entriesTable.pure_quantity})`
+        })
+        .from(entriesTable)
+        .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
+        .innerJoin(items, eq(entriesTable.item_id, items.id))
+        .where(
+          and(
+            eq(entryGroups.is_deleted, false),
+            inArray(entryGroups.type, ["SALE", "PURCHASE"]),
+            inArray(items.type, ["GOLD", "ORNAMENT"])
+          )
+        )
+        .groupBy(entryGroups.type);
+    })()
+  ]);
 
-  // Gold pure total: sum pure_quantity across all active lots (not gross weight)
+  // 1. Gold Total Pure in shop
   let gold_total_pure = zero;
-  for (const itemId of goldItemIds) {
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, itemId);
-    for (const lot of lots) {
+  for (const lot of shopLots) {
+    if (goldItemIds.includes(lot.item_id)) {
       const pq = lot.pure_quantity ?? zero;
-      if (isFinite(Number(pq))) gold_total_pure = gold_total_pure.plus(pq);
-    }
-  }
-
-  // MC gold pure total: sum pure_quantity across all goldsmith lots
-  let mc_gold_total = zero;
-  for (const g of goldsmiths) {
-    for (const itemId of goldItemIds) {
-      const lots = await getLotBalances(g.id, itemId);
-      for (const lot of lots) {
-        const pq = lot.pure_quantity ?? zero;
-        if (isFinite(Number(pq))) mc_gold_total = mc_gold_total.plus(pq);
+      if (isFinite(Number(pq))) {
+        gold_total_pure = gold_total_pure.plus(pq);
       }
     }
   }
 
-  // Profit / Loss: sum pure_quantity of SALE minus PURCHASE
-  const { entries: entriesTable, entryGroups } = await import("@/db/schema");
-  const { inArray, sql } = await import("drizzle-orm");
-  const profitLossRows = await db
-    .select({
-      type: entryGroups.type,
-      pure_quantity: sql<string>`SUM(${entriesTable.pure_quantity})`
-    })
-    .from(entriesTable)
-    .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
-    .innerJoin(items, eq(entriesTable.item_id, items.id))
-    .where(
-      and(
-        eq(entryGroups.is_deleted, false),
-        inArray(entryGroups.type, ["SALE", "PURCHASE"]),
-        inArray(items.type, ["GOLD", "ORNAMENT"])
-      )
-    )
-    .groupBy(entryGroups.type);
+  // 2. Ornament count: number of distinct items with positive balance in shop
+  const ornamentBalances = new Map<string, Decimal>();
+  for (const lot of shopLots) {
+    if (ornamentItemIds.includes(lot.item_id)) {
+      const qty = lot.quantity ?? zero;
+      if (isFinite(Number(qty))) {
+        const current = ornamentBalances.get(lot.item_id) ?? zero;
+        ornamentBalances.set(lot.item_id, current.plus(qty));
+      }
+    }
+  }
+  const ornaments_in_stock = Array.from(ornamentBalances.values()).filter((b) => b.gt(zero)).length;
 
+  // 3. MC Gold Total
+  let mc_gold_total = zero;
+  for (const lot of mcLots) {
+    const pq = lot.pure_quantity ?? zero;
+    if (isFinite(Number(pq))) {
+      mc_gold_total = mc_gold_total.plus(pq);
+    }
+  }
+
+  // 4. Profit / Loss
   let salesPure = toDecimal("0");
   let purchasesPure = toDecimal("0");
   for (const row of profitLossRows) {
@@ -104,24 +118,24 @@ async function getGoldStock(input: { page: number; limit: number }) {
     .where(and(eq(items.type, "GOLD"), eq(items.is_deleted, false)))
     .orderBy(items.entry_no);
 
-  const flatLots = [];
-  for (const item of goldItems) {
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
-    for (const lot of lots) {
-      const qty = Number(lot.quantity);
-      const pur = lot.purity ? Number(lot.purity) : null;
-      const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
-      flatLots.push({
-        item,
-        lot_id: lot.lot_id,
-        balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
-        purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
-        average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
-        pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
-        created_at: lot.created_at,
-      });
-    }
-  }
+  const goldItemIds = goldItems.map((item) => item.id);
+  const lots = await getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds);
+
+  const flatLots = lots.map((lot) => {
+    const item = goldItems.find((i) => i.id === lot.item_id)!;
+    const qty = Number(lot.quantity);
+    const pur = lot.purity ? Number(lot.purity) : null;
+    const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
+    return {
+      item,
+      lot_id: lot.lot_id,
+      balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
+      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
+      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
+      created_at: lot.created_at,
+    };
+  });
 
   // Newest purchases first — so page 1 always shows the latest stock
   flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
@@ -138,24 +152,24 @@ async function getOrnamentStock(input: { page: number; limit: number }) {
     .where(and(eq(items.type, "ORNAMENT"), eq(items.is_deleted, false)))
     .orderBy(items.entry_no);
 
-  const flatLots = [];
-  for (const item of ornamentItems) {
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
-    for (const lot of lots) {
-      const qty = Number(lot.quantity);
-      const pur = lot.purity ? Number(lot.purity) : null;
-      const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
-      flatLots.push({
-        item,
-        lot_id: lot.lot_id,
-        balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
-        purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
-        average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
-        pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
-        created_at: lot.created_at,
-      });
-    }
-  }
+  const ornamentItemIds = ornamentItems.map((item) => item.id);
+  const lots = await getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, ornamentItemIds);
+
+  const flatLots = lots.map((lot) => {
+    const item = ornamentItems.find((i) => i.id === lot.item_id)!;
+    const qty = Number(lot.quantity);
+    const pur = lot.purity ? Number(lot.purity) : null;
+    const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
+    return {
+      item,
+      lot_id: lot.lot_id,
+      balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
+      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
+      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
+      created_at: lot.created_at,
+    };
+  });
 
   // Newest purchases first — so page 1 always shows the latest stock
   flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
@@ -180,24 +194,23 @@ async function getMcGoldStock() {
     .where(and(eq(items.type, "GOLD"), eq(items.is_deleted, false)))
     .orderBy(items.entry_no);
 
-  const flatLots = [];
-  for (const g of goldsmiths) {
-    for (const item of goldItems) {
-      const lots = await getLotBalances(g.id, item.id);
-      for (const lot of lots) {
-        flatLots.push({
-          goldsmith: g,
-          item: item,
-          lot_id: lot.lot_id,
-          balance: lot.quantity.toFixed(8),
-          purity: lot.purity?.toFixed(8),
-          average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (lot.purity ? lot.purity.toFixed(8) : undefined),
-          pure_balance: lot.pure_quantity?.toFixed(8),
-          created_at: lot.created_at,
-        });
-      }
-    }
-  }
+  const goldItemIds = goldItems.map((item) => item.id);
+  const lots = await getAllGoldsmithsLotBalances(goldItemIds);
+
+  const flatLots = lots.map((lot) => {
+    const g = goldsmiths.find((acc) => acc.id === lot.account_id)!;
+    const item = goldItems.find((i) => i.id === lot.item_id)!;
+    return {
+      goldsmith: g,
+      item,
+      lot_id: lot.lot_id,
+      balance: lot.quantity.toFixed(8),
+      purity: lot.purity?.toFixed(8),
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (lot.purity ? lot.purity.toFixed(8) : undefined),
+      pure_balance: lot.pure_quantity?.toFixed(8),
+      created_at: lot.created_at,
+    };
+  });
 
   flatLots.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
   return flatLots;
@@ -486,21 +499,7 @@ async function getExportData() {
     .where(and(eq(items.type, "GOLD"), eq(items.is_deleted, false)))
     .orderBy(items.entry_no);
 
-  const goldLots = [];
-  for (const item of goldItems) {
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
-    for (const lot of lots) {
-      goldLots.push({
-        "Lot ID": lot.lot_id ?? "-",
-        "Gold Type": item.name,
-        "Weight (g)": Number(lot.quantity.toFixed(3)),
-        "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
-        "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
-        "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
-        "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
-      });
-    }
-  }
+  const goldItemIds = goldItems.map((item) => item.id);
 
   // 2. Ornament Stock
   const ornamentItems = await db
@@ -509,24 +508,58 @@ async function getExportData() {
     .where(and(eq(items.type, "ORNAMENT"), eq(items.is_deleted, false)))
     .orderBy(items.entry_no);
 
-  const ornamentLots = [];
-  for (const item of ornamentItems) {
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.id);
-    for (const lot of lots) {
-      ornamentLots.push({
-        "Lot ID": lot.lot_id ?? "-",
-        "Ornament Type": item.name,
-        "Weight (g)": Number(lot.quantity.toFixed(3)),
-        "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
-        "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
-        "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
-        "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
-      });
-    }
-  }
+  const ornamentItemIds = ornamentItems.map((item) => item.id);
 
-  // 3. MC Gold Stock
-  const mcGoldStock = await getMcGoldStock();
+  // Fetch shop gold lots, shop ornament lots, MC gold lots, and profit/loss data in parallel
+  const [shopGoldLots, shopOrnamentLots, mcGoldStock, profitLossData] = await Promise.all([
+    getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds),
+    getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, ornamentItemIds),
+    getMcGoldStock(),
+    db
+      .select({
+        entry: entriesTable,
+        group: entryGroups,
+        item: items,
+      })
+      .from(entriesTable)
+      .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
+      .innerJoin(items, eq(entriesTable.item_id, items.id))
+      .where(
+        and(
+          eq(entryGroups.is_deleted, false),
+          inArray(entryGroups.type, ["SALE", "PURCHASE"]),
+          inArray(items.type, ["GOLD", "ORNAMENT"])
+        )
+      )
+      .orderBy(desc(entryGroups.created_at))
+  ]);
+
+  const goldLots = shopGoldLots.map((lot) => {
+    const item = goldItems.find((i) => i.id === lot.item_id)!;
+    return {
+      "Lot ID": lot.lot_id ?? "-",
+      "Gold Type": item.name,
+      "Weight (g)": Number(lot.quantity.toFixed(3)),
+      "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+      "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
+      "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
+      "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
+    };
+  });
+
+  const ornamentLots = shopOrnamentLots.map((lot) => {
+    const item = ornamentItems.find((i) => i.id === lot.item_id)!;
+    return {
+      "Lot ID": lot.lot_id ?? "-",
+      "Ornament Type": item.name,
+      "Weight (g)": Number(lot.quantity.toFixed(3)),
+      "Touch %": lot.purity ? Number(lot.purity.toFixed(2)) : 0,
+      "Avg. Touch %": lot.average_touch ? Number(lot.average_touch.toFixed(2)) : (lot.purity ? Number(lot.purity.toFixed(2)) : 0),
+      "Pure Weight (g)": lot.pure_quantity ? Number(lot.pure_quantity.toFixed(3)) : 0,
+      "Date Added": new Date(lot.created_at).toLocaleDateString("en-IN"),
+    };
+  });
+
   const mcGoldLots = mcGoldStock.map((row) => ({
     "Goldsmith": row.goldsmith.name,
     "Lot ID": row.lot_id ?? "-",
@@ -537,25 +570,6 @@ async function getExportData() {
     "Pure Weight (g)": row.pure_balance ? Number(Number(row.pure_balance).toFixed(3)) : 0,
     "Date Added": new Date(row.created_at).toLocaleDateString("en-IN"),
   }));
-
-  // 4. Profit / Loss Stock
-  const conditions = [
-    eq(entryGroups.is_deleted, false),
-    inArray(entryGroups.type, ["SALE", "PURCHASE"]),
-    inArray(items.type, ["GOLD", "ORNAMENT"]),
-  ];
-
-  const profitLossData = await db
-    .select({
-      entry: entriesTable,
-      group: entryGroups,
-      item: items,
-    })
-    .from(entriesTable)
-    .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
-    .innerJoin(items, eq(entriesTable.item_id, items.id))
-    .where(and(...conditions))
-    .orderBy(desc(entryGroups.created_at));
 
   const profitLossLots = profitLossData.map((row, index) => {
     const isPurchase = row.group.type === "PURCHASE";

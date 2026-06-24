@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { entries, accounts } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, or, sql, inArray, lte, isNotNull } from "drizzle-orm";
 import { subtractDecimals, toDecimal, type Decimal } from "./decimal";
 import { SYSTEM_ITEMS } from "@/config/constants";
 
@@ -94,107 +94,150 @@ export async function getAggregateBalances(
     ? sql`AND e.group_id != ${excludeGroupId}`
     : sql``;
 
-  // Shared aliases for clarity — entries 'e', entry_groups 'g'
   const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
 
-  // 1. Total Pure Balance = SUM(inflow pure_quantity) - SUM(outflow pure_quantity)
-  const [pureInflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
-        FROM entries e
-        WHERE e.to_account_id = ${accountId}
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
-  
-  const [pureOutflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
-        FROM entries e
-        WHERE e.from_account_id = ${accountId}
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
+  const [row] = await db.execute<{
+    pure_inflow: string | null;
+    pure_outflow: string | null;
+    cash_inflow: string | null;
+    cash_outflow: string | null;
+    payment_pure: string | null;
+    cash_no_rate: string | null;
+  }>(sql`
+    SELECT
+      SUM(CASE WHEN e.to_account_id = ${accountId} THEN e.pure_quantity ELSE 0 END)::text AS pure_inflow,
+      SUM(CASE WHEN e.from_account_id = ${accountId} THEN e.pure_quantity ELSE 0 END)::text AS pure_outflow,
+      
+      SUM(CASE WHEN e.to_account_id = ${accountId} AND e.item_id = ${cashItemId} THEN e.quantity ELSE 0 END)::text AS cash_inflow,
+      SUM(CASE WHEN e.from_account_id = ${accountId} AND e.item_id = ${cashItemId} THEN e.quantity ELSE 0 END)::text AS cash_outflow,
 
-  // 2. Total Cash Balance (kept for backward compatibility — raw RUPEE net flow)
-  const [cashInflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
-        FROM entries e
-        WHERE e.to_account_id = ${accountId}
-          AND e.item_id = ${cashItemId}
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
-  
-  const [cashOutflow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
-        FROM entries e
-        WHERE e.from_account_id = ${accountId}
-          AND e.item_id = ${cashItemId}
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
-
-  // 3. Rate-stable payment pure equivalent:
-  //    For each RUPEE payment from the customer that belongs to a bill WITH a rate,
-  //    divide the payment by that bill's rate. This makes the balance independent of
-  //    any future rate change.
-  //    Formula: Σ(payment_amount / rate_of_bill) - Σ(refund_amount / rate_of_bill)
-  const [paymentPureRow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(
+      SUM(CASE 
+        WHEN e.item_id = ${cashItemId} AND g.rate_per_gram IS NOT NULL AND g.rate_per_gram::numeric > 0 THEN
           CASE
-            WHEN e.from_account_id = ${accountId}
-              THEN e.quantity / NULLIF(g.rate_per_gram::numeric, 0)
-            WHEN e.to_account_id = ${accountId}
-              THEN -(e.quantity / NULLIF(g.rate_per_gram::numeric, 0))
+            WHEN e.from_account_id = ${accountId} THEN e.quantity / g.rate_per_gram::numeric
+            WHEN e.to_account_id = ${accountId} THEN -(e.quantity / g.rate_per_gram::numeric)
             ELSE 0
           END
-        ), 0)::text AS total
-        FROM entries e
-        INNER JOIN entry_groups g ON e.group_id = g.id
-        WHERE (e.from_account_id = ${accountId} OR e.to_account_id = ${accountId})
-          AND e.item_id = ${cashItemId}
-          AND g.rate_per_gram IS NOT NULL
-          AND g.rate_per_gram::numeric > 0
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
+        ELSE 0
+      END)::text AS payment_pure,
 
-  // 4. Cash flows from OPENING entries (no rate_per_gram) — e.g. opening_cash_balance
-  //    These cannot be converted per-bill, so they are kept as raw cash amounts.
-  //    They will be divided by lastRate in the service layer for display.
-  const [cashNoRateRow] = await db.execute<{ total: string | null }>(
-    sql`SELECT COALESCE(SUM(
+      SUM(CASE
+        WHEN e.item_id = ${cashItemId} AND (g.rate_per_gram IS NULL OR g.rate_per_gram::numeric = 0) THEN
           CASE
-            WHEN e.to_account_id = ${accountId}   THEN  e.quantity
+            WHEN e.to_account_id = ${accountId} THEN e.quantity
             WHEN e.from_account_id = ${accountId} THEN -e.quantity
             ELSE 0
           END
-        ), 0)::text AS total
-        FROM entries e
-        INNER JOIN entry_groups g ON e.group_id = g.id
-        WHERE (e.from_account_id = ${accountId} OR e.to_account_id = ${accountId})
-          AND e.item_id = ${cashItemId}
-          AND (g.rate_per_gram IS NULL OR g.rate_per_gram::numeric = 0)
-          ${dateFilter}
-          ${excludeFilter}`,
-  );
+        ELSE 0
+      END)::text AS cash_no_rate
+    FROM entries e
+    LEFT JOIN entry_groups g ON e.group_id = g.id
+    WHERE (e.to_account_id = ${accountId} OR e.from_account_id = ${accountId})
+      ${dateFilter}
+      ${excludeFilter}
+  `);
 
-  const pureBalance = subtractDecimals(pureInflow?.total ?? "0", pureOutflow?.total ?? "0");
-  const cashBalance = subtractDecimals(cashInflow?.total ?? "0", cashOutflow?.total ?? "0");
-  const paymentPure = toDecimal(paymentPureRow?.total ?? "0");
-  const cashNoRate = toDecimal(cashNoRateRow?.total ?? "0");
+  const pureInflow = row?.pure_inflow ?? "0";
+  const pureOutflow = row?.pure_outflow ?? "0";
+  const cashInflow = row?.cash_inflow ?? "0";
+  const cashOutflow = row?.cash_outflow ?? "0";
+  const paymentPure = toDecimal(row?.payment_pure ?? "0");
 
-  // balancePure = pure received − (payments converted at bill rate) + opening_cash_no_rate
-  // The cashNoRate term is handled by the caller dividing it by lastRate.
-  // We expose it as a separate field so the caller can apply lastRate correctly.
-  // For the common case (no opening cash balance): cashNoRate = 0 → balancePure = pureBalance − paymentPure
+  const pureBalance = subtractDecimals(pureInflow, pureOutflow);
+  const cashBalance = subtractDecimals(cashInflow, cashOutflow);
   const balancePureBeforeCash = pureBalance.minus(paymentPure);
 
   return {
     totalPure: pureBalance,
     totalCash: cashBalance,
-    balancePure: balancePureBeforeCash, // rate-stable, excludes opening cash (handled in service)
-    // internal: expose cashNoRate via totalCash for the service layer to handle opening_cash_balance
+    balancePure: balancePureBeforeCash,
   };
+}
+
+export async function getBatchAggregateBalances(
+  tuples: { id: string; accountId: string; createdAt: Date; excludeGroupId: string }[]
+): Promise<Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }>> {
+  if (tuples.length === 0) return {};
+
+  const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
+
+  // Build: VALUES (id1, acc1, date1, excl1), (id2, acc2, date2, excl2), ...
+  const valuesChunks = tuples.map(
+    (t) => sql`(${t.id}::text, ${t.accountId}::uuid, ${t.createdAt.toISOString()}::timestamp, ${t.excludeGroupId}::uuid)`
+  );
+  
+  const query = sql`
+    WITH params(id, account_id, created_at, exclude_group_id) AS (
+      VALUES ${sql.join(valuesChunks, sql`, `)}
+    )
+    SELECT 
+      p.id,
+      SUM(CASE WHEN e.to_account_id = p.account_id AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.pure_quantity ELSE 0 END)::text AS pure_inflow,
+      SUM(CASE WHEN e.from_account_id = p.account_id AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.pure_quantity ELSE 0 END)::text AS pure_outflow,
+      SUM(CASE WHEN e.to_account_id = p.account_id AND e.item_id = ${cashItemId} AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.quantity ELSE 0 END)::text AS cash_inflow,
+      SUM(CASE WHEN e.from_account_id = p.account_id AND e.item_id = ${cashItemId} AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.quantity ELSE 0 END)::text AS cash_outflow,
+      SUM(CASE 
+        WHEN e.item_id = ${cashItemId} 
+          AND (e.from_account_id = p.account_id OR e.to_account_id = p.account_id)
+          AND e.created_at <= p.created_at 
+          AND e.group_id != p.exclude_group_id
+          AND g.rate_per_gram IS NOT NULL 
+          AND g.rate_per_gram::numeric > 0 
+        THEN
+          CASE
+            WHEN e.from_account_id = p.account_id THEN e.quantity / g.rate_per_gram::numeric
+            WHEN e.to_account_id = p.account_id THEN -(e.quantity / g.rate_per_gram::numeric)
+            ELSE 0
+          END
+        ELSE 0
+      END)::text AS payment_pure
+    FROM params p
+    LEFT JOIN entries e ON (e.to_account_id = p.account_id OR e.from_account_id = p.account_id)
+    LEFT JOIN entry_groups g ON e.group_id = g.id
+    GROUP BY p.id;
+  `;
+
+  const rows = await db.execute<{
+    id: string;
+    pure_inflow: string | null;
+    pure_outflow: string | null;
+    cash_inflow: string | null;
+    cash_outflow: string | null;
+    payment_pure: string | null;
+  }>(query);
+
+  const results: Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }> = {};
+
+  for (const row of rows) {
+    const pureInflow = row.pure_inflow ?? "0";
+    const pureOutflow = row.pure_outflow ?? "0";
+    const cashInflow = row.cash_inflow ?? "0";
+    const cashOutflow = row.cash_outflow ?? "0";
+    const paymentPure = toDecimal(row.payment_pure ?? "0");
+
+    const pureBalance = subtractDecimals(pureInflow, pureOutflow);
+    const cashBalance = subtractDecimals(cashInflow, cashOutflow);
+    const balancePureBeforeCash = pureBalance.minus(paymentPure);
+
+    results[row.id] = {
+      totalPure: pureBalance,
+      totalCash: cashBalance,
+      balancePure: balancePureBeforeCash,
+    };
+  }
+
+  // Ensure any input tuples that somehow got skipped or returned null are defaulted
+  for (const t of tuples) {
+    if (!results[t.id]) {
+      results[t.id] = {
+        totalPure: toDecimal("0"),
+        totalCash: toDecimal("0"),
+        balancePure: toDecimal("0"),
+      };
+    }
+  }
+
+  return results;
 }
 
 export interface LotBalance {
@@ -251,5 +294,127 @@ export async function getLotBalances(
     average_touch: row.average_touch ? toDecimal(row.average_touch) : null,
     pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity) : null,
     created_at: new Date(row.created_at),
+  }));
+}
+
+export interface AccountLotBalance {
+  item_id: string;
+  lot_id: string;
+  quantity: Decimal;
+  purity: Decimal | null;
+  average_touch: Decimal | null;
+  pure_quantity: Decimal | null;
+  created_at: Date;
+}
+
+export async function getAccountLotBalances(
+  accountId: string,
+  itemIds?: string[],
+  asOfDate?: Date,
+): Promise<AccountLotBalance[]> {
+  const query = db
+    .select({
+      item_id: entries.item_id,
+      lot_id: entries.lot_id,
+      net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
+      purity: sql`MAX(${entries.purity})::text`,
+      average_touch: sql`MAX(${entries.average_touch})::text`,
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.pure_quantity} ELSE -${entries.pure_quantity} END)::text`,
+      created_at: sql`MIN(${entries.created_at})`,
+    })
+    .from(entries)
+    .where(
+      and(
+        isNotNull(entries.lot_id),
+        or(
+          eq(entries.to_account_id, accountId),
+          eq(entries.from_account_id, accountId),
+        ),
+        itemIds && itemIds.length > 0 ? inArray(entries.item_id, itemIds) : undefined,
+        asOfDate ? lte(entries.created_at, asOfDate) : undefined,
+      )
+    )
+    .groupBy(entries.item_id, entries.lot_id)
+    .having(
+      sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END) != 0`
+    )
+    .orderBy(sql`MIN(${entries.created_at})`);
+
+  const result = await query;
+
+  return result.map((row) => ({
+    item_id: row.item_id!,
+    lot_id: row.lot_id!,
+    quantity: toDecimal(row.net_quantity as string),
+    purity: row.purity ? toDecimal(row.purity as string) : null,
+    average_touch: row.average_touch ? toDecimal(row.average_touch as string) : null,
+    pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity as string) : null,
+    created_at: new Date(row.created_at as string | Date),
+  }));
+}
+
+export interface GoldsmithLotBalance {
+  account_id: string;
+  item_id: string;
+  lot_id: string;
+  quantity: Decimal;
+  purity: Decimal | null;
+  average_touch: Decimal | null;
+  pure_quantity: Decimal | null;
+  created_at: Date;
+}
+
+export async function getAllGoldsmithsLotBalances(
+  itemIds?: string[],
+  asOfDate?: Date,
+): Promise<GoldsmithLotBalance[]> {
+  const query = db
+    .select({
+      account_id: accounts.id,
+      item_id: entries.item_id,
+      lot_id: entries.lot_id,
+      net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accounts.id} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
+      purity: sql`MAX(${entries.purity})::text`,
+      average_touch: sql`MAX(${entries.average_touch})::text`,
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accounts.id} THEN ${entries.pure_quantity} ELSE -${entries.pure_quantity} END)::text`,
+      created_at: sql`MIN(${entries.created_at})`,
+    })
+    .from(entries)
+    .innerJoin(
+      accounts,
+      or(
+        eq(entries.to_account_id, accounts.id),
+        eq(entries.from_account_id, accounts.id)
+      )
+    )
+    .where(
+      and(
+        isNotNull(entries.lot_id),
+        or(
+          eq(accounts.type, "GOLDSMITH"),
+          eq(accounts.customer_type, "GOLD_SMITH")
+        ),
+        eq(accounts.is_deleted, false),
+        itemIds && itemIds.length > 0 ? inArray(entries.item_id, itemIds) : undefined,
+        asOfDate ? lte(entries.created_at, asOfDate) : undefined,
+      )
+    )
+    .groupBy(accounts.id, entries.item_id, entries.lot_id)
+    .having(
+      sql`SUM(CASE WHEN ${entries.to_account_id} = ${accounts.id} THEN ${entries.quantity} ELSE -${entries.quantity} END) != 0`
+    )
+    .orderBy(sql`MIN(${entries.created_at})`);
+
+  const result = await query;
+
+  return result.map((row) => ({
+    account_id: row.account_id,
+    item_id: row.item_id!,
+    lot_id: row.lot_id!,
+    quantity: toDecimal(row.net_quantity as string),
+    purity: row.purity ? toDecimal(row.purity as string) : null,
+    average_touch: row.average_touch ? toDecimal(row.average_touch as string) : null,
+    pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity as string) : null,
+    created_at: new Date(row.created_at as string | Date),
   }));
 }

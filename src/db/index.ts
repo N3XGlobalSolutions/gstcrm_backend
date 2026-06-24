@@ -55,7 +55,7 @@ if (neonHostname && neonHostname.includes("neon.tech")) {
 // `max_lifetime` recycles sockets that Neon may close during inactivity.
 // `idle_timeout` keeps connections alive between requests.
 const connection = postgres(env.DATABASE_URL, {
-  max: 5,
+  max: 15,
   idle_timeout: 30,
   connect_timeout: 60,
   max_lifetime: 60 * 20,

@@ -7,7 +7,7 @@ import { listTransactions, getTransactionById, generateBillNo } from "@/lib/tran
 import { db } from "@/db";
 import { entries as entriesTable, items as itemsTable, gstPurchaseHistory, accounts, entryGroups } from "@/db/schema";
 import { inArray, eq, desc, count } from "drizzle-orm";
-import { getAggregateBalances } from "@/lib/balance";
+import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -67,25 +67,27 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     };
   });
 
-  const finalEnrichedData = await Promise.all(
-    enrichedData.map(async (d) => {
-      // Find the historical balance up to this group's exact time, strictly excluding the group itself!
-      const opening = await getAggregateBalances(
-        d.group.account_id,
-        new Date(d.group.created_at),
-        d.group.id
-      );
+  // Batch-fetch opening balances in a single query
+  const tuples = enrichedData.map((d) => ({
+    id: d.group.id,
+    accountId: d.group.account_id,
+    createdAt: new Date(d.group.created_at),
+    excludeGroupId: d.group.id,
+  }));
+  const batchBalances = await getBatchAggregateBalances(tuples);
 
-      return {
-        ...d,
-        openingPure: (-parseFloat(opening.balancePure.toString() || "0")).toFixed(4),
-        openingCash: ((-parseFloat(opening.balancePure.toString() || "0")) * (d.group.rate_per_gram ? parseFloat(d.group.rate_per_gram) : 0)).toFixed(2),
-        isConverted: d.isConverted,
-        canUndoConversion: d.canUndoConversion,
-        convertedAt: d.convertedAt,
-      };
-    })
-  );
+  const finalEnrichedData = enrichedData.map((d) => {
+    const opening = batchBalances[d.group.id]!;
+
+    return {
+      ...d,
+      openingPure: (-parseFloat(opening.balancePure.toString() || "0")).toFixed(4),
+      openingCash: ((-parseFloat(opening.balancePure.toString() || "0")) * (d.group.rate_per_gram ? parseFloat(d.group.rate_per_gram) : 0)).toFixed(2),
+      isConverted: d.isConverted,
+      canUndoConversion: d.canUndoConversion,
+      convertedAt: d.convertedAt,
+    };
+  });
 
   return { ...result, data: finalEnrichedData };
 }

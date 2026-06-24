@@ -3,6 +3,22 @@ import app from "./app";
 import { env } from "./config/env";
 import { db } from "./db";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { sql } from "drizzle-orm";
+
+// ─── Neon Keep-Alive Ping ──────────────────────────────────────────────────────
+function startKeepAlive() {
+  const INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+  setInterval(async () => {
+    try {
+      const start = performance.now();
+      await db.execute(sql`SELECT 1`);
+      const duration = performance.now() - start;
+      console.log(`[Keep-Alive] Database pinged successfully in ${duration.toFixed(2)}ms`);
+    } catch (error) {
+      console.error("[Keep-Alive] Database ping failed:", error);
+    }
+  }, INTERVAL_MS);
+}
 
 // ─── Run Migrations and Start server ──────────────────────────────────────────
 async function start() {
@@ -19,6 +35,7 @@ async function start() {
     console.log(
       `✅ Gold Billing Server running on port ${env.PORT} (${env.NODE_ENV})`,
     );
+    startKeepAlive();
   });
 }
 

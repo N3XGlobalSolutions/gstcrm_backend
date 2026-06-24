@@ -18,7 +18,7 @@ import { db } from "@/db";
 import { entries, entries as entriesTable, items as itemsTable, accounts, entryGroups, gstSalesHistory } from "@/db/schema";
 import { sql, inArray, eq, desc, count } from "drizzle-orm";
 import { createSystemNotification } from "@/modules/notifications/service";
-import { getAggregateBalances } from "@/lib/balance";
+import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -78,29 +78,31 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
     };
   });
 
-  const finalEnrichedData = await Promise.all(
-    enrichedData.map(async (d) => {
-      // Opening balance = customer's aggregate up to (but not including) this group.
-      const opening = await getAggregateBalances(
-        d.group.account_id,
-        new Date(d.group.created_at),
-        d.group.id,
-      );
+  // Batch-fetch opening balances in a single query
+  const tuples = enrichedData.map((d) => ({
+    id: d.group.id,
+    accountId: d.group.account_id,
+    createdAt: new Date(d.group.created_at),
+    excludeGroupId: d.group.id,
+  }));
+  const batchBalances = await getBatchAggregateBalances(tuples);
 
-      return {
-        ...d,
-        // openingPure = rate-stable balance before this bill (pure grams).
-        // balancePure = totalPure − Σ(prior_payment / prior_rate) — never affected by rate changes.
-        openingPure: opening.balancePure.toFixed(4),
-        // openingCash is kept for backward compatibility display in the history table.
-        // It is the raw totalCash ledger value (negative = prior payments sent by customer).
-        openingCash: opening.totalCash.toFixed(2),
-        isConverted: d.isConverted,
-        canUndoConversion: d.canUndoConversion,
-        convertedAt: d.convertedAt,
-      };
-    }),
-  );
+  const finalEnrichedData = enrichedData.map((d) => {
+    const opening = batchBalances[d.group.id]!;
+
+    return {
+      ...d,
+      // openingPure = rate-stable balance before this bill (pure grams).
+      // balancePure = totalPure − Σ(prior_payment / prior_rate) — never affected by rate changes.
+      openingPure: opening.totalPure.toFixed(4),
+      // openingCash is kept for backward compatibility display in the history table.
+      // It is the raw totalCash ledger value (negative = prior payments sent by customer).
+      openingCash: opening.totalCash.toFixed(2),
+      isConverted: d.isConverted,
+      canUndoConversion: d.canUndoConversion,
+      convertedAt: d.convertedAt,
+    };
+  });
 
   return { data: finalEnrichedData, total: result.total };
 }
@@ -133,30 +135,32 @@ export async function createSale(
   // Steps 5–7 inside one transaction so the SELECT FOR UPDATE lock is held
   // through the insert — prevents two concurrent sales from overselling the same lot.
   return db.transaction(async (tx) => {
-    // Step 5 — Lock entry rows then read lot balance within the same transaction
-    for (const item of processedItems) {
-      await tx.execute(
-        sql`SELECT id FROM ${entries}
-            WHERE item_id = ${item.item_id}
-              AND lot_id IS NOT NULL
-              AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
-            FOR UPDATE`,
-      );
-      const [row] = await tx.execute<{ available: string }>(
-        sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
-            FROM ${entries}
-            WHERE item_id = ${item.item_id}
-              AND lot_id = ${item.lot_id}
-              AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
-      );
-      const available = toDecimal(row?.available ?? "0");
-      if (available.lt(toDecimal(item.totalQuantityStr))) {
-        throw new AppError(
-          "BUSINESS_RULE_VIOLATION",
-          `Insufficient stock for item ${item.item_id} in lot ${item.lot_id}`,
+    // Step 5 — Lock entry rows then read lot balance within the same transaction in parallel
+    await Promise.all(
+      processedItems.map(async (item) => {
+        await tx.execute(
+          sql`SELECT id FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND lot_id IS NOT NULL
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
+              FOR UPDATE`,
         );
-      }
-    }
+        const [row] = await tx.execute<{ available: string }>(
+          sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
+              FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND lot_id = ${item.lot_id}
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
+        );
+        const available = toDecimal(row?.available ?? "0");
+        if (available.lt(toDecimal(item.totalQuantityStr))) {
+          throw new AppError(
+            "BUSINESS_RULE_VIOLATION",
+            `Insufficient stock for item ${item.item_id} in lot ${item.lot_id}`,
+          );
+        }
+      })
+    );
 
     // Step 6 — Bill number per customer (uses tx so it's consistent with the insert)
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, input.account_id, "SALE");

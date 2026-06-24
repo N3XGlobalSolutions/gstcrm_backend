@@ -10,7 +10,7 @@ import {
   toDecimal,
   toQuantityString,
 } from "@/lib/decimal";
-import { getLotBalances, getAggregateBalances } from "@/lib/balance";
+import { getLotBalances, getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import {
   listTransactions,
@@ -44,26 +44,29 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
     .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
     .where(inArray(entriesTable.group_id, groupIds));
 
-  const finalData = await Promise.all(
-    result.data.map(async (d) => {
-      const groupEntries = txEntries.filter(
-        (e) => e.entry.group_id === d.group.id,
-      );
+  // Batch-fetch opening balances in a single query
+  const tuples = result.data.map((d) => ({
+    id: d.group.id,
+    accountId: d.group.account_id,
+    createdAt: new Date(d.group.created_at),
+    excludeGroupId: d.group.id,
+  }));
+  const batchBalances = await getBatchAggregateBalances(tuples);
 
-      const opening = await getAggregateBalances(
-        d.group.account_id,
-        new Date(d.group.created_at),
-        d.group.id,
-      );
+  const finalData = result.data.map((d) => {
+    const groupEntries = txEntries.filter(
+      (e) => e.entry.group_id === d.group.id,
+    );
 
-      return {
-        ...d,
-        entries: groupEntries,
-        openingPure: opening.totalPure.toFixed(4),
-        openingCash: opening.totalCash.toFixed(2),
-      };
-    }),
-  );
+    const opening = batchBalances[d.group.id]!;
+
+    return {
+      ...d,
+      entries: groupEntries,
+      openingPure: opening.totalPure.toFixed(4),
+      openingCash: opening.totalCash.toFixed(2),
+    };
+  });
 
   return { ...result, data: finalData };
 }

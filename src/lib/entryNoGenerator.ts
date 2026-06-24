@@ -79,3 +79,31 @@ export async function generateLotId(tx: DbOrTx): Promise<string> {
   const nextNo = Number(rows[0]?.next_lot_no ?? 1);
   return `LOT-${String(nextNo).padStart(4, "0")}`;
 }
+
+/**
+ * Generate a list of next lot_ids in a single database round-trip.
+ * Must be called inside the caller's DB transaction.
+ *
+ * @param tx - The active Drizzle transaction
+ * @param count - Number of lot IDs to generate
+ * @returns An array of generated lot_id strings
+ */
+export async function generateLotIds(tx: DbOrTx, count: number): Promise<string[]> {
+  if (count <= 0) return [];
+  await (tx as Database).execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext(${'lot_id'}))`,
+  );
+
+  const result = await (tx as Database).execute(
+    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) AS max_lot_no FROM entries WHERE lot_id IS NOT NULL`,
+  );
+
+  const rows = result as unknown as Array<{ max_lot_no: string | number | null }>;
+  const startNo = Number(rows[0]?.max_lot_no ?? 0) + 1;
+
+  const ids = [];
+  for (let i = 0; i < count; i++) {
+    ids.push(`LOT-${String(startNo + i).padStart(4, "0")}`);
+  }
+  return ids;
+}

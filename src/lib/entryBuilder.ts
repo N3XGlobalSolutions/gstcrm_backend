@@ -15,7 +15,7 @@ import {
   toAmountString,
   toDecimal,
 } from "./decimal";
-import { generateEntryGroupNo, generateLotId } from "./entryNoGenerator";
+import { generateEntryGroupNo, generateLotId, generateLotIds } from "./entryNoGenerator";
 import { generateBillNo } from "./transactionQueries";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -120,8 +120,32 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
     const itemTypeMap = new Map(itemTypes.map((i) => [i.id, i.type]));
     const accountTypeMap = new Map(accountTypes.map((a) => [a.id, a]));
 
-    // Step 3 — Insert each entry with computed quantities
-    const insertedEntries = [];
+    // Step 2.5 - Pre-calculate lot IDs to avoid sequential round-trips
+    let neededLotIdsCount = 0;
+    for (const entry of input.entries) {
+      if (!entry.lotId) {
+        const itemType = itemTypeMap.get(entry.itemId);
+        const toAccount = accountTypeMap.get(entry.toAccountId);
+        const toAccountType = toAccount?.type;
+        const toCustomerType = toAccount?.customer_type;
+        if (
+          (itemType === "GOLD" || itemType === "ORNAMENT") &&
+          (
+            toAccountType === "SHOP" ||
+            toAccountType === "GOLDSMITH" ||
+            (toAccountType === "CUSTOMER" && toCustomerType === "GOLD_SMITH")
+          )
+        ) {
+          neededLotIdsCount++;
+        }
+      }
+    }
+
+    const generatedLotIds = await generateLotIds(tx, neededLotIdsCount);
+    let lotIdIdx = 0;
+
+    // Step 3 — Build and insert entries as a single batch
+    const entriesToInsert = [];
     for (const entry of input.entries) {
       // Compute pure_quantity from purity, or use direct override if provided
       let pureQuantity: string | undefined;
@@ -171,35 +195,37 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
             (toAccountType === "CUSTOMER" && toCustomerType === "GOLD_SMITH")
           )
         ) {
-          finalLotId = await generateLotId(tx);
+          finalLotId = generatedLotIds[lotIdIdx++];
         }
       }
 
-      const [inserted] = await tx
-        .insert(entries)
-        .values({
-          group_id: group.id,
-          lot_id: finalLotId,
-          from_account_id: entry.fromAccountId,
-          to_account_id: entry.toAccountId,
-          item_id: entry.itemId,
-          quantity: entry.quantity,
-          purity: entry.purity,
-          pure_quantity: pureQuantity,
-          wastage_mode: entry.wastageMode as
-            | (typeof wastageModeEnum.enumValues)[number]
-            | undefined,
-          wastage_value: entry.wastageValue,
-          wastage_quantity: wastageQuantity,
-          rate: entry.rate,
-          amount: entry.amount,
-          average_touch: averageTouch,
-          remarks: entry.remarks,
-        })
-        .returning();
+      entriesToInsert.push({
+        group_id: group.id,
+        lot_id: finalLotId,
+        from_account_id: entry.fromAccountId,
+        to_account_id: entry.toAccountId,
+        item_id: entry.itemId,
+        quantity: entry.quantity,
+        purity: entry.purity,
+        pure_quantity: pureQuantity,
+        wastage_mode: entry.wastageMode as
+          | (typeof wastageModeEnum.enumValues)[number]
+          | undefined,
+        wastage_value: entry.wastageValue,
+        wastage_quantity: wastageQuantity,
+        rate: entry.rate,
+        amount: entry.amount,
+        average_touch: averageTouch,
+        remarks: entry.remarks,
+      });
+    }
 
-      if (!inserted) throw new Error("Failed to insert entry");
-      insertedEntries.push(inserted);
+    let insertedEntries: any[] = [];
+    if (entriesToInsert.length > 0) {
+      insertedEntries = await tx.insert(entries).values(entriesToInsert).returning();
+      if (insertedEntries.length !== entriesToInsert.length) {
+        throw new Error("Failed to insert all entries");
+      }
     }
 
     return { group, entries: insertedEntries };
