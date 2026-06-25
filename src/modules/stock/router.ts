@@ -129,10 +129,10 @@ async function getGoldStock(input: { page: number; limit: number }) {
     return {
       item,
       lot_id: lot.lot_id,
-      balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
-      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
-      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
-      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
+      balance: isNaN(qty) ? '0.000' : lot.quantity.toFixed(3),
+      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined,
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined),
+      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(3) : undefined,
       created_at: lot.created_at,
     };
   });
@@ -163,10 +163,10 @@ async function getOrnamentStock(input: { page: number; limit: number }) {
     return {
       item,
       lot_id: lot.lot_id,
-      balance: isNaN(qty) ? '0.00000000' : lot.quantity.toFixed(8),
-      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined,
-      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(8) : undefined),
-      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(8) : undefined,
+      balance: isNaN(qty) ? '0.000' : lot.quantity.toFixed(3),
+      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined,
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined),
+      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(3) : undefined,
       created_at: lot.created_at,
     };
   });
@@ -204,10 +204,10 @@ async function getMcGoldStock() {
       goldsmith: g,
       item,
       lot_id: lot.lot_id,
-      balance: lot.quantity.toFixed(8),
-      purity: lot.purity?.toFixed(8),
-      average_touch: lot.average_touch ? lot.average_touch.toFixed(8) : (lot.purity ? lot.purity.toFixed(8) : undefined),
-      pure_balance: lot.pure_quantity?.toFixed(8),
+      balance: lot.quantity.toFixed(3),
+      purity: lot.purity?.toFixed(2),
+      average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (lot.purity ? lot.purity.toFixed(2) : undefined),
+      pure_balance: lot.pure_quantity?.toFixed(3),
       created_at: lot.created_at,
     };
   });

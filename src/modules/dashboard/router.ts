@@ -92,14 +92,21 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
       ),
     ]);
 
+  // Apply system-wide precision rules at the API boundary:
+  // Cash amounts → 2dp | Gold weights (pure grams) → 3dp
+  const fmt2 = (raw: string | undefined) =>
+    parseFloat(raw ?? '0').toFixed(2);
+  const fmt3 = (raw: string | undefined) =>
+    parseFloat(raw ?? '0').toFixed(3);
+
   return {
     range: { from, to },
-    total_sales: (total_sales as any)[0]?.total ?? "0",
-    total_purchase: (total_purchase as any)[0]?.total ?? "0",
-    total_stock_sales: (total_stock_sales as any)[0]?.total ?? "0",
-    total_job_work: (total_job_work as any)[0]?.total ?? 0,
-    total_labour_bill: (total_labour_bill as any)[0]?.total ?? "0",
-    total_expense: (total_expense as any)[0]?.total ?? "0",
+    total_sales:       fmt2((total_sales      as any)[0]?.total),   // cash ₹ → 2dp
+    total_purchase:    fmt3((total_purchase   as any)[0]?.total),   // gold pure grams → 3dp
+    total_stock_sales: fmt3((total_stock_sales as any)[0]?.total),  // gold grams dispatched → 3dp
+    total_job_work:    (total_job_work as any)[0]?.total ?? 0,      // count — no rounding
+    total_labour_bill: fmt3((total_labour_bill as any)[0]?.total),  // pure grams → 3dp
+    total_expense:     fmt2((total_expense    as any)[0]?.total),   // cash ₹ → 2dp
   };
 }
 

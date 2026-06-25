@@ -217,7 +217,7 @@ export async function getAccountBalance(
   input: z.infer<typeof GetAccountBalanceSchema>,
 ) {
   const balance = await getBalance(input.accountId, input.itemId);
-  return { balance: balance.toFixed(8) };
+  return { balance: balance.toFixed(3) };
 }
 
 // ─── getAggregateBalances ──────────────────────────────────────────────────────
@@ -244,12 +244,10 @@ export async function getAccountAggregateBalances(
     .limit(1);
 
   return {
-    totalPure: balances.totalPure.toFixed(8),
+    totalPure: balances.totalPure.toFixed(3),
     totalCash: balances.totalCash.toFixed(2),
-    // Rate-stable opening balance in pure grams.
-    // Each payment is divided by the rate of its own bill (not the latest rate),
-    // so changing the rate on a future bill never creates phantom balance.
-    balancePure: balances.balancePure.toFixed(8),
+    // Rate-stable opening balance in pure grams. 3dp = system standard for gold.
+    balancePure: balances.balancePure.toFixed(3),
     lastRate: lastGroup?.rate_per_gram ?? null,
   };
 }

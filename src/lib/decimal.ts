@@ -108,10 +108,11 @@ export function divideDecimals(a: string, b: string): Decimal {
 }
 
 /**
- * Serialize a Decimal for DB write (quantities use 8 decimal places).
+ * Serialize a Decimal for DB write — gold/weight quantities use 3 decimal places.
+ * Rule: all gold weights stored and calculated to 3dp. Cash to 2dp.
  */
 export function toQuantityString(value: Decimal): string {
-  return value.toFixed(8);
+  return value.toFixed(3);
 }
 
 /**
