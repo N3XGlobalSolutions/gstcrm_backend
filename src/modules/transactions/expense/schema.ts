@@ -13,6 +13,8 @@ export const CreateExpenseSchema = z.object({
   name: z.string().min(1),
   amount: z.string(),
   reason: z.string().min(1),
+  from_account_id: z.string().uuid().optional(),
+  bank_details: z.string().optional(),
 });
 
 export const UpdateExpenseSchema = CreateExpenseSchema.extend({

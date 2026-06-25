@@ -30,7 +30,21 @@ import { eq, and, isNotNull, desc, not } from "drizzle-orm";
 // ─── listAccounts ─────────────────────────────────────────────────────────────
 
 export async function listAccounts(input: z.infer<typeof ListAccountsSchema>) {
-  return findManyAccounts(input);
+  const result = await findManyAccounts(input);
+  const dataWithBalances = await Promise.all(
+    result.data.map(async (acc) => {
+      const balances = await getAggregateBalances(acc.id);
+      return {
+        ...acc,
+        opening_pure_balance: balances.balancePure.toFixed(8),
+        opening_cash_balance: balances.totalCash.toFixed(2),
+      };
+    })
+  );
+  return {
+    data: dataWithBalances,
+    total: result.total,
+  };
 }
 
 // ─── createAccount ────────────────────────────────────────────────────────────

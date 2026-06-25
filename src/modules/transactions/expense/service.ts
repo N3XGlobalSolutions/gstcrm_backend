@@ -62,6 +62,9 @@ export async function listExpenses(input: z.infer<typeof ListExpenseSchema>) {
       .select({
         group: entryGroups,
         account_name: accounts.name,
+        amount: sql<string>`(SELECT quantity::text FROM ${entries} WHERE group_id = ${entryGroups.id} AND item_id = ${SYSTEM_ITEMS.RUPEE_ITEM_ID} LIMIT 1)`,
+        from_account_id: sql<string>`(SELECT from_account_id::text FROM ${entries} WHERE group_id = ${entryGroups.id} AND item_id = ${SYSTEM_ITEMS.RUPEE_ITEM_ID} LIMIT 1)`,
+        bank_details: sql<string | null>`(SELECT remarks FROM ${entries} WHERE group_id = ${entryGroups.id} AND item_id = ${SYSTEM_ITEMS.RUPEE_ITEM_ID} LIMIT 1)`
       })
       .from(entryGroups)
       .leftJoin(accounts, eq(entryGroups.account_id, accounts.id))
@@ -114,6 +117,8 @@ export async function createExpense(
 
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, SYSTEM_ACCOUNTS.EXPENSE_ID, "EXPENSE");
 
+    const from_account_id = input.from_account_id || SYSTEM_ACCOUNTS.CASH_ID;
+
     const { group, entries: created } = await createEntryGroup({
       type: "EXPENSE",
       accountId: expense_account_id,
@@ -123,10 +128,11 @@ export async function createExpense(
       remarks: input.reason,
       entries: [
         {
-          fromAccountId: SYSTEM_ACCOUNTS.CASH_ID,
+          fromAccountId: from_account_id,
           toAccountId: expense_account_id,
           itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
           quantity: input.amount,
+          remarks: input.bank_details || undefined,
         },
       ],
     }, tx);
