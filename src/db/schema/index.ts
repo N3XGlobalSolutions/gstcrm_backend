@@ -9,4 +9,5 @@ export * from "./auth_audit";
 export * from "./refresh_tokens";
 export * from "./gst-sales-history";
 export * from "./gst-purchase-history";
+export * from "./labour-bill-cycles";
 

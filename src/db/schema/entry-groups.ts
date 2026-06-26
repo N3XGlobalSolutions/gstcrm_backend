@@ -11,6 +11,7 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { accounts } from "./accounts";
+import { labourBillCycles } from "./labour-bill-cycles";
 
 // ─── Enum ─────────────────────────────────────────────────────────────────────
 
@@ -32,6 +33,8 @@ export const entryGroups = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     entry_no: integer("entry_no"),
     bill_no: integer("bill_no"),
+    // For LABOUR_BILL entries: links to the permanent bill cycle this entry belongs to
+    bill_cycle_id: uuid("bill_cycle_id").references(() => labourBillCycles.id),
     date: date("date").notNull(),
     type: entryGroupTypeEnum("type").notNull(),
     account_id: uuid("account_id")

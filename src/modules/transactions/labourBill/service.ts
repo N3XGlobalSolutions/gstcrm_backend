@@ -12,8 +12,8 @@ import {
   getTransactionById,
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
-import { entries as entriesTable, items as itemsTable, entryGroups } from "@/db/schema";
-import { inArray, eq } from "drizzle-orm";
+import { entries as entriesTable, items as itemsTable, entryGroups, labourBillCycles, accounts } from "@/db/schema";
+import { inArray, eq, and, max, desc, sql } from "drizzle-orm";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -21,6 +21,9 @@ import type {
   CreateLabourBillSchema,
   UpdateLabourBillSchema,
   DeleteTxSchema,
+  CreateCycleSchema,
+  ListCyclesSchema,
+  GetCycleDetailSchema,
 } from "./schema";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
@@ -52,6 +55,111 @@ function calcOrnamentEntry(item: {
     pureQuantity: toQuantityString(pureQuantity),
     wastageGm: toQuantityString(wastageGm),
   };
+}
+
+// ─── createCycle ─────────────────────────────────────────────────────────────
+// Creates a new bill cycle (permanent ledger book) for a goldsmith.
+// The bill_no is auto-incremented per-account (1, 2, 3…).
+
+export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
+  return db.transaction(async (tx) => {
+    // Lock the account row to serialize bill_no generation for this account
+    await tx.execute(
+      sql`SELECT id FROM ${accounts} WHERE id = ${input.account_id} FOR UPDATE`
+    );
+
+    // Use MAX(bill_no) + 1 per account
+    const [row] = await tx
+      .select({ max: max(labourBillCycles.bill_no) })
+      .from(labourBillCycles)
+      .where(eq(labourBillCycles.account_id, input.account_id));
+
+    const nextBillNo = (row?.max ?? 0) + 1;
+
+    const [cycle] = await tx
+      .insert(labourBillCycles)
+      .values({
+        account_id: input.account_id,
+        bill_no: nextBillNo,
+        main_reason: input.main_reason ?? null,
+      })
+      .returning();
+
+    if (!cycle) throw new AppError("INTERNAL_ERROR", "Failed to create bill cycle");
+    return cycle;
+  });
+}
+
+// ─── listCycles ───────────────────────────────────────────────────────────────
+// Returns all bill cycles for a goldsmith, ordered by bill_no ascending.
+
+export async function listCycles(input: z.infer<typeof ListCyclesSchema>) {
+  const cycles = await db
+    .select()
+    .from(labourBillCycles)
+    .where(eq(labourBillCycles.account_id, input.account_id))
+    .orderBy(desc(labourBillCycles.bill_no));
+
+  return cycles;
+}
+
+// ─── getCycleDetail ───────────────────────────────────────────────────────────
+// Returns a bill cycle + all its entry groups + entries, for drill-down view.
+
+export async function getCycleDetail(input: z.infer<typeof GetCycleDetailSchema>) {
+  // 1. Fetch the cycle record
+  const [cycle] = await db
+    .select()
+    .from(labourBillCycles)
+    .where(eq(labourBillCycles.id, input.cycle_id))
+    .limit(1);
+
+  if (!cycle) throw new AppError("NOT_FOUND", "Bill cycle not found");
+
+  // 2. Fetch all non-deleted entry groups that belong to this cycle
+  const groups = await db
+    .select({
+      group: entryGroups,
+    })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.bill_cycle_id, input.cycle_id),
+        eq(entryGroups.is_deleted, false),
+      )
+    )
+    .orderBy(entryGroups.created_at);
+
+  if (groups.length === 0) {
+    return { cycle, groups: [] };
+  }
+
+  // 3. Fetch all entries for those groups
+  const groupIds = groups.map((g) => g.group.id);
+  const txEntries = await db
+    .select({
+      entry: entriesTable,
+      item_name: itemsTable.name,
+      item_type: itemsTable.type,
+    })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(inArray(entriesTable.group_id, groupIds));
+
+  // 4. Join entries back to groups
+  const entryMap = new Map<string, typeof txEntries>();
+  for (const e of txEntries) {
+    const gId = e.entry.group_id;
+    if (!entryMap.has(gId)) entryMap.set(gId, []);
+    entryMap.get(gId)!.push(e);
+  }
+
+  const enrichedGroups = groups.map((g) => ({
+    ...g,
+    entries: entryMap.get(g.group.id) ?? [],
+  }));
+
+  return { cycle, groups: enrichedGroups };
 }
 
 // ─── listLabourBills ──────────────────────────────────────────────────────────
@@ -115,6 +223,18 @@ export async function createLabourBill(
   input: z.infer<typeof CreateLabourBillSchema>,
   options?: { existingBillNo?: number; existingEntryNo?: number }
 ) {
+  let cycleBillNo: number | undefined;
+  if (input.bill_cycle_id) {
+    const [cycle] = await db
+      .select({ bill_no: labourBillCycles.bill_no })
+      .from(labourBillCycles)
+      .where(eq(labourBillCycles.id, input.bill_cycle_id))
+      .limit(1);
+    if (cycle) {
+      cycleBillNo = cycle.bill_no;
+    }
+  }
+
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
   // ── 1. Gold Issue: SHOP → Goldsmith ────────────────────────────────────────
@@ -241,6 +361,28 @@ export async function createLabourBill(
     });
   }
 
+  // ── 6.5. Discount ──────────────────────────────────────────────────────────
+  if (input.discount && toDecimal(input.discount).gt(0)) {
+    entries.push({
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.discount,
+      remarks: "Discount",
+    });
+  }
+
+  // ── 6.6. TDS ───────────────────────────────────────────────────────────────
+  if (input.tds && toDecimal(input.tds).gt(0)) {
+    entries.push({
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.tds,
+      remarks: "TDS",
+    });
+  }
+
   // ── 7. Partial Cash Conversions ─────────────────────────────────────────────
   // Each conversion records that the goldsmith now owes cash instead of pure gold.
   // The goldsmith sends cash_amount worth of their gold debt to SHOP as a MONEY entry.
@@ -265,10 +407,12 @@ export async function createLabourBill(
     type: "LABOUR_BILL",
     accountId: input.account_id,
     date: input.date,
-    billNo: options?.existingBillNo,
+    billNo: cycleBillNo !== undefined ? cycleBillNo : options?.existingBillNo,
     entryNo: options?.existingEntryNo,
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
+    billCycleId: input.bill_cycle_id,
+    tdsAmount: input.tds,
     entries,
   });
 
