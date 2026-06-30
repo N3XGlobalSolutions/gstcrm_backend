@@ -64,6 +64,13 @@
       "when": 1782292278706,
       "tag": "0008_narrow_vision",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1782900000000,
+      "tag": "0009_labour_bill_cycles",
+      "breakpoints": true
     }
   ]
 }

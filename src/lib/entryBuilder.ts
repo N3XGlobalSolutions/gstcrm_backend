@@ -52,6 +52,7 @@ export interface CreateEntryGroupInput {
   date: string; // ISO YYYY-MM-DD
   entryNo?: number;
   billNo?: number;
+  billCycleId?: string;  // FK to labour_bill_cycles.id
   ratePerGram?: string;
   remarks?: string;
   reversalOf?: string;
@@ -97,6 +98,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         type: input.type,
         account_id: input.accountId,
         bill_no: groupBillNo,
+        bill_cycle_id: input.billCycleId ?? null,
         rate_per_gram: input.ratePerGram,
         remarks: input.remarks,
         reversal_of: input.reversalOf,

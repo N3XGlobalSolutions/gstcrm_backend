@@ -73,6 +73,9 @@ export const CreateLabourBillSchema = z.object({
   rate_per_gram: positiveDecimalSchema.optional(),
   remarks: z.string().optional(),
 
+  // Bill Cycle: the permanent ledger this entry belongs to
+  bill_cycle_id: z.string().uuid().optional(),
+
   // 4-direction stock entries (all between SHOP and GOLDSMITH)
   gold_issue:       z.array(GoldItemSchema).default([]),    // SHOP → Goldsmith
   gold_receipt:     z.array(GoldItemSchema).default([]),    // Goldsmith → SHOP
@@ -98,3 +101,6 @@ export const UpdateLabourBillSchema = CreateLabourBillSchema.extend({
 // ─── Re-export types ───────────────────────────────────────────────────────────
 export type CreateLabourBillInput = z.infer<typeof CreateLabourBillSchema>;
 export type UpdateLabourBillInput = z.infer<typeof UpdateLabourBillSchema>;
+export type CreateCycleInput = z.infer<typeof CreateCycleSchema>;
+export type ListCyclesInput = z.infer<typeof ListCyclesSchema>;
+export type GetCycleDetailInput = z.infer<typeof GetCycleDetailSchema>;
