@@ -16,7 +16,7 @@ import {
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
 import { entries, entries as entriesTable, items as itemsTable, accounts, entryGroups, gstSalesHistory } from "@/db/schema";
-import { sql, inArray, eq, desc, count } from "drizzle-orm";
+import { sql, inArray, eq, desc, count, not, isNotNull, and } from "drizzle-orm";
 import { createSystemNotification } from "@/modules/notifications/service";
 import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
 import type { z } from "zod";
@@ -117,10 +117,16 @@ export async function createSale(
   input: z.infer<typeof CreateSalesSchema>,
   creator: { id: string; username: string },
   isUpdate: boolean = false,
-  options?: { existingBillNo?: number; existingEntryNo?: number }
+  options?: { existingBillNo?: number; existingEntryNo?: number; groupId?: string }
 ) {
   // Step 1 — Per-item wastage + pure calculations
   const processedItems = input.items.map((item) => {
+    if (item.wastage_mode === "PERCENT" && toDecimal(item.purity).lte(0)) {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        "Purity must be greater than zero when using PERCENT wastage mode"
+      );
+    }
     const wastageQty =
       item.wastage_mode === "PERCENT"
         ? calcWastagePercent(item.quantity, item.wastage_value, item.purity)
@@ -135,6 +141,76 @@ export async function createSale(
   // Steps 5–7 inside one transaction so the SELECT FOR UPDATE lock is held
   // through the insert — prevents two concurrent sales from overselling the same lot.
   return db.transaction(async (tx) => {
+    // Overpayment validation check
+    const ratePerGram = toDecimal(input.rate_per_gram);
+    const pureValuePure = processedItems.reduce((acc, item) => {
+      return acc.plus(toDecimal(item.totalQuantityStr).mul(toDecimal(item.purity).div(100)));
+    }, toDecimal(0));
+    const pureValueCash = pureValuePure.mul(ratePerGram);
+
+    const discountCash = toDecimal(input.discount ?? "0");
+    const discountPure = toDecimal(input.discount_pure ?? "0");
+    const discountPureAsCash = discountPure.mul(ratePerGram);
+    const tdsAmount = toDecimal(input.tds_amount ?? "0");
+    const tcsAmount = toDecimal(input.tcs_amount ?? "0");
+    const bankAmount = toDecimal(input.bank_amount ?? "0");
+
+    const opening = await getAggregateBalances(input.account_id, undefined, options?.groupId);
+    const parsedOpeningPure = opening.balancePure;
+
+    const [lastGroup] = await tx
+      .select({ rate_per_gram: entryGroups.rate_per_gram })
+      .from(entryGroups)
+      .where(
+        and(
+          eq(entryGroups.account_id, input.account_id),
+          eq(entryGroups.is_deleted, false),
+          not(eq(entryGroups.type, "REVERSAL")),
+          isNotNull(entryGroups.rate_per_gram),
+          options?.groupId ? not(eq(entryGroups.id, options.groupId)) : undefined
+        )
+      )
+      .orderBy(desc(entryGroups.created_at))
+      .limit(1);
+
+    const lastRate = toDecimal(lastGroup?.rate_per_gram ?? "0");
+    const parsedOpeningCash = lastRate.gt(0) ? parsedOpeningPure.mul(lastRate) : toDecimal(0);
+
+    if (input.balance_mode === "PURE") {
+      const bankInPure = ratePerGram.gt(0) ? bankAmount.div(ratePerGram) : toDecimal(0);
+      const discountCashAsPure = ratePerGram.gt(0) ? discountCash.div(ratePerGram) : toDecimal(0);
+      const tdsInPure = ratePerGram.gt(0) ? tdsAmount.div(ratePerGram) : toDecimal(0);
+      const tcsInPure = ratePerGram.gt(0) ? tcsAmount.div(ratePerGram) : toDecimal(0);
+
+      const totalOwedPure = parsedOpeningPure
+        .plus(pureValuePure)
+        .minus(discountPure)
+        .minus(discountCashAsPure)
+        .minus(tdsInPure)
+        .plus(tcsInPure);
+
+      const maxAllowedCash = totalOwedPure.mul(ratePerGram);
+      if (bankAmount.gt(maxAllowedCash.plus(0.01))) {
+        throw new AppError(
+          "BUSINESS_RULE_VIOLATION",
+          `Payment amount ₹${bankAmount.toFixed(2)} exceeds the outstanding balance ₹${Math.max(0, parseFloat(maxAllowedCash.toFixed(2)))}`
+        );
+      }
+    } else {
+      const totalOwedCash = parsedOpeningCash
+        .plus(pureValueCash)
+        .minus(discountCash)
+        .minus(discountPureAsCash)
+        .minus(tdsAmount)
+        .plus(tcsAmount);
+
+      if (bankAmount.gt(totalOwedCash.plus(0.01))) {
+        throw new AppError(
+          "BUSINESS_RULE_VIOLATION",
+          `Payment amount ₹${bankAmount.toFixed(2)} exceeds the outstanding balance ₹${Math.max(0, parseFloat(totalOwedCash.toFixed(2)))}`
+        );
+      }
+    }
     // Step 5 — Lock entry rows then read lot balance within the same transaction in parallel
     await Promise.all(
       processedItems.map(async (item) => {
@@ -170,11 +246,9 @@ export async function createSale(
     // Discounts reduce the customer's payable balance. We write a RUPEE entry
     // FROM the shop TO the customer (the shop "gives back" money) so that
     // getAggregateBalances subtracts it correctly via the payment-pure formula.
-    const rateNum = toDecimal(input.rate_per_gram);
-    const discountCash = toDecimal(input.discount ?? "0");
+    const rateNum = ratePerGram;
     // discount_pure is in grams; convert to cash at bill rate for ledger entry.
     const discountPureGrams = toDecimal(input.discount_pure ?? "0");
-    const discountPureAsCash = rateNum.gt(0) ? discountPureGrams.times(rateNum) : toDecimal("0");
     const totalDiscountCash = discountCash.plus(discountPureAsCash);
 
     const entryInputs = [
@@ -200,13 +274,13 @@ export async function createSale(
             },
           ]
         : []),
-      // Discount — shop returns cash to the customer (reduces their payable balance).
-      // Recorded as SHOP → CUSTOMER RUPEE flow so it's subtracted in payment-pure calc.
+      // Discount — customer "pays" with the discount to reduce their payable balance.
+      // Recorded as CUSTOMER → SHOP RUPEE flow so it behaves as a payment and reduces customer's gold balance.
       ...(totalDiscountCash.gt(0)
         ? [
             {
-              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-              toAccountId: input.account_id,
+              fromAccountId: input.account_id,
+              toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
               itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
               quantity: totalDiscountCash.toFixed(2),
               remarks: "Discount",
@@ -298,6 +372,7 @@ export async function updateSale(
   return createSale(createInput, creator, true, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
+    groupId: input.id,
   });
 }
 

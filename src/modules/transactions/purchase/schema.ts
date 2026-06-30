@@ -15,23 +15,31 @@ export const DeleteTxSchema = z.object({ id: z.string().uuid() });
 
 // ─── Purchase schemas ─────────────────────────────────────────────────────────
 
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
+const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
+const nonNegativeDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0, "Must be non-negative");
+const puritySchema = z.string().refine(v => {
+  const p = parseFloat(v);
+  return !isNaN(p) && p > 0 && p <= 100;
+}, "Purity must be between 0.01% and 100%");
+
 const PurchaseItemSchema = z.object({
   item_id: z.string().uuid(),
-  quantity: z.string(),
-  purity: z.string(),
+  quantity: positiveDecimalSchema,
+  purity: puritySchema,
 });
 
 export const CreatePurchaseSchema = z.object({
   account_id: z.string().uuid(),
-  date: z.string(),
-  rate_per_gram: z.string(),
+  date: dateSchema,
+  rate_per_gram: positiveDecimalSchema,
   remarks: z.string().optional(),
   gold_items: z.array(PurchaseItemSchema).default([]),
   ornament_items: z.array(PurchaseItemSchema).default([]),
-  bank_amount: z.string().default("0"),
+  bank_amount: nonNegativeDecimalSchema.default("0"),
   bank_details: z.string().optional(),
-  discount: z.string().optional(),
-  discount_pure: z.string().optional(),
+  discount: nonNegativeDecimalSchema.optional(),
+  discount_pure: nonNegativeDecimalSchema.optional(),
 });
 
 export const UpdatePurchaseSchema = CreatePurchaseSchema.extend({
@@ -40,8 +48,8 @@ export const UpdatePurchaseSchema = CreatePurchaseSchema.extend({
 
 export const UpdateGSTPurchaseConversionSchema = z.object({
   id: z.string().uuid(),
-  gst_amount: z.string(),
-  tds_amount: z.string(),
-  tcs_amount: z.string(),
+  gst_amount: nonNegativeDecimalSchema,
+  tds_amount: nonNegativeDecimalSchema,
+  tcs_amount: nonNegativeDecimalSchema,
 });
 

@@ -8,10 +8,13 @@ export const ListExpenseSchema = z.object({
 
 export const GetByIdSchema = z.object({ id: z.string().uuid() });
 
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
+const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
+
 export const CreateExpenseSchema = z.object({
-  date: z.string(),
+  date: dateSchema,
   name: z.string().min(1),
-  amount: z.string(),
+  amount: positiveDecimalSchema,
   reason: z.string().min(1),
   from_account_id: z.string().uuid().optional(),
   bank_details: z.string().optional(),

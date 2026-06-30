@@ -150,12 +150,12 @@ export async function createPurchase(
         ]
       : []),
     // Discount — shop deducts from what it owes the supplier.
-    // SUPPLIER → SHOP: reduces shop's outstanding payable to supplier.
+    // SHOP → SUPPLIER: reduces shop's outstanding payable to supplier.
     ...(totalDiscountCash.gt(0)
       ? [
           {
-            fromAccountId: input.account_id,
-            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            toAccountId: input.account_id,
             itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
             quantity: totalDiscountCash.toFixed(2),
             remarks: 'Discount',

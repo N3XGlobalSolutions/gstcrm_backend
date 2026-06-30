@@ -11,38 +11,66 @@ export const ListTxSchema = z.object({
 export const GetByIdSchema = z.object({ id: z.string().uuid() });
 export const DeleteTxSchema = z.object({ id: z.string().uuid() });
 
+// ─── Bill Cycle schemas ────────────────────────────────────────────────────────
+
+export const CreateCycleSchema = z.object({
+  account_id: z.string().uuid(),
+  main_reason: z.string().optional(),
+});
+
+export const ListCyclesSchema = z.object({
+  account_id: z.string().uuid(),
+});
+
+export const GetCycleDetailSchema = z.object({
+  cycle_id: z.string().uuid(),
+});
+
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
+const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
+const nonNegativeDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0, "Must be non-negative");
+const puritySchema = z.string().refine(v => {
+  const p = parseFloat(v);
+  return !isNaN(p) && p > 0 && p <= 100;
+}, "Purity must be between 0.01% and 100%");
+
 // ─── Gold item (Issue or Receipt) ─────────────────────────────────────────────
 const GoldItemSchema = z.object({
   item_id: z.string().uuid(),
   lot_id: z.string().optional(), // required for Issue (stock check), optional for Receipt
-  quantity: z.string(),          // gross weight in grams
-  purity: z.string(),            // touch percentage (e.g. "92")
+  quantity: positiveDecimalSchema,          // gross weight in grams
+  purity: puritySchema,            // touch percentage (e.g. "92")
 });
 
 // ─── Ornament item (Issue or Receipt) ─────────────────────────────────────────
 // Wastage formula: wastage_gm = (quantity × wastage_percent/100) / (purity/100)
 // gross = quantity + wastage_gm, pure = gross × (purity/100)
+const wastagePercentSchema = z.string().refine(v => {
+  const w = parseFloat(v);
+  return !isNaN(w) && w >= 0 && w <= 100;
+}, "Wastage percentage must be between 0% and 100%");
+
 const OrnamentItemSchema = z.object({
   item_id: z.string().uuid(),
   lot_id: z.string().optional(), // required for Issue (stock check), optional for Receipt
-  quantity: z.string(),          // base ornament weight
-  purity: z.string(),            // touch percentage
-  wastage_percent: z.string().default("0"),
+  quantity: positiveDecimalSchema,          // base ornament weight
+  purity: puritySchema,            // touch percentage
+  wastage_percent: wastagePercentSchema.default("0"),
 });
 
 // ─── Partial cash conversion ───────────────────────────────────────────────────
 // Converts some pure gold owed by goldsmith into a cash debt
 const CashConversionSchema = z.object({
-  gold_grams: z.string(),        // pure gold grams being converted
-  rate_per_gram: z.string(),     // rate applied
-  cash_amount: z.string(),       // = gold_grams × rate_per_gram (pre-computed by frontend)
+  gold_grams: positiveDecimalSchema,        // pure gold grams being converted
+  rate_per_gram: positiveDecimalSchema,     // rate applied
+  cash_amount: positiveDecimalSchema,       // = gold_grams × rate_per_gram (pre-computed by frontend)
 });
 
 // ─── CreateLabourBill ──────────────────────────────────────────────────────────
 export const CreateLabourBillSchema = z.object({
   account_id: z.string().uuid(),
-  date: z.string(),
-  rate_per_gram: z.string().optional(),
+  date: dateSchema,
+  rate_per_gram: positiveDecimalSchema.optional(),
   remarks: z.string().optional(),
 
   // 4-direction stock entries (all between SHOP and GOLDSMITH)
@@ -52,10 +80,12 @@ export const CreateLabourBillSchema = z.object({
   ornament_receipt: z.array(OrnamentItemSchema).default([]),// Goldsmith → SHOP
 
   // Cash settlements
-  bank_paid:         z.string().optional(), // SHOP pays goldsmith (cash out)
+  bank_paid:         nonNegativeDecimalSchema.optional(), // SHOP pays goldsmith (cash out)
   bank_paid_details: z.string().optional(),
-  bank_receive:         z.string().optional(), // Goldsmith pays SHOP (cash in)
+  bank_receive:         nonNegativeDecimalSchema.optional(), // Goldsmith pays SHOP (cash in)
   bank_receive_details: z.string().optional(),
+  discount:             nonNegativeDecimalSchema.optional(),
+  tds:                  nonNegativeDecimalSchema.optional(),
 
   // Partial gold-to-cash conversions (each converts slip pure into cash debt)
   cash_conversions: z.array(CashConversionSchema).default([]),

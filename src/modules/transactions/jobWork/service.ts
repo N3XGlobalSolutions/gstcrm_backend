@@ -111,6 +111,13 @@ function processOrnamentItem(item: {
     subtractDecimals(toQuantityString(subtractDecimals(item.quantity, stone)), throde),
   );
 
+  if (item.wastage_mode === "PERCENT" && toDecimal(item.purity).lte(0)) {
+    throw new AppError(
+      "BUSINESS_RULE_VIOLATION",
+      "Purity must be greater than zero when using PERCENT wastage mode"
+    );
+  }
+
   const wastageQty =
     item.wastage_mode === "PERCENT"
       ? calcWastagePercent(base_weight, item.wastage_value, item.purity)

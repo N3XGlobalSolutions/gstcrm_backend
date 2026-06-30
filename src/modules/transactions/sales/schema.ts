@@ -14,33 +14,53 @@ export const ListTxSchema = z.object({
 export const GetByIdSchema = z.object({ id: z.string().uuid() });
 export const DeleteTxSchema = z.object({ id: z.string().uuid() });
 
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
+const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
+const nonNegativeDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0, "Must be non-negative");
+const puritySchema = z.string().refine(v => {
+  const p = parseFloat(v);
+  return !isNaN(p) && p > 0 && p <= 100;
+}, "Purity must be between 0.01% and 100%");
+
 const SalesItemSchema = z.object({
   item_id: z.string().uuid(),
   lot_id: z.string().min(1, "Lot ID is required"),
-  quantity: z.string(),
-  purity: z.string(),
+  quantity: positiveDecimalSchema,
+  purity: puritySchema,
   wastage_mode: z.enum(["PERCENT", "GRAM"]),
-  wastage_value: z.string(),
+  wastage_value: nonNegativeDecimalSchema,
+}).superRefine((val, ctx) => {
+  // When PERCENT mode: value must be between 0 and 100 (inclusive)
+  if (val.wastage_mode === "PERCENT") {
+    const w = parseFloat(val.wastage_value);
+    if (isNaN(w) || w < 0 || w > 100) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["wastage_value"],
+        message: "Wastage percentage must be between 0% and 100%",
+      });
+    }
+  }
 });
 
 export const CreateSalesSchema = z.object({
   account_id: z.string().uuid(),
-  date: z.string(),
-  rate_per_gram: z.string(),
+  date: dateSchema,
+  rate_per_gram: positiveDecimalSchema,
   remarks: z.string().optional(),
   items: z.array(SalesItemSchema).min(1),
-  bank_amount: z.string().default('0'),
+  bank_amount: nonNegativeDecimalSchema.default('0'),
   bank_details: z.string().optional(),
   // Discount fields — applied to reduce customer balance in the ledger.
-  discount: z.string().default('0'),
-  discount_pure: z.string().default('0'),
+  discount: nonNegativeDecimalSchema.default('0'),
+  discount_pure: nonNegativeDecimalSchema.default('0'),
   balance_mode: z.enum(['PURE', 'CASH']).default('PURE'),
   rate_for_balance: z.string().optional(),
   // TDS/TCS — tax withholding adjustments that affect the running balance.
   tds_enabled: z.boolean().default(false),
-  tds_amount: z.string().default('0'),
+  tds_amount: nonNegativeDecimalSchema.default('0'),
   tcs_enabled: z.boolean().default(false),
-  tcs_amount: z.string().default('0'),
+  tcs_amount: nonNegativeDecimalSchema.default('0'),
 });
 
 export const UpdateSalesSchema = CreateSalesSchema.extend({
@@ -49,7 +69,7 @@ export const UpdateSalesSchema = CreateSalesSchema.extend({
 
 export const UpdateGSTConversionSchema = z.object({
   id: z.string().uuid(),
-  gst_amount: z.string(),
-  tds_amount: z.string(),
-  tcs_amount: z.string(),
+  gst_amount: nonNegativeDecimalSchema,
+  tds_amount: nonNegativeDecimalSchema,
+  tcs_amount: nonNegativeDecimalSchema,
 });

@@ -31,8 +31,12 @@ export function calcWastagePercent(
   wastagePercent: string,
   touchPercent: string,
 ): Decimal {
+  const touch = toDecimal(touchPercent);
+  if (touch.lte(0)) {
+    throw new Error("Purity must be greater than zero when using PERCENT wastage mode");
+  }
   return toDecimal(baseWeight).mul(
-    toDecimal(wastagePercent).div(toDecimal(touchPercent)),
+    toDecimal(wastagePercent).div(touch),
   );
 }
 
