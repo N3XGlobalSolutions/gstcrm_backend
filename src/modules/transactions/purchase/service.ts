@@ -6,7 +6,7 @@ import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import { listTransactions, getTransactionById, generateBillNo } from "@/lib/transactionQueries";
 import { db } from "@/db";
 import { entries as entriesTable, items as itemsTable, gstPurchaseHistory, accounts, entryGroups } from "@/db/schema";
-import { inArray, eq, desc, count } from "drizzle-orm";
+import { inArray, eq, desc, count, and, not, isNotNull, sql } from "drizzle-orm";
 import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
 import type { z } from "zod";
 import type {
@@ -96,12 +96,77 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   const tx = await getTransactionById(input.id);
   if (!tx) throw new AppError("NOT_FOUND", "Purchase not found");
 
-  // Separate entries by item type from the join
+  const billNo = tx.group.bill_no;
+  let matchingSaleGroup: any[] = [];
+  if (billNo !== null) {
+    matchingSaleGroup = await db
+      .select()
+      .from(entryGroups)
+      .where(
+        and(
+          eq(entryGroups.account_id, tx.group.account_id),
+          eq(entryGroups.bill_no, billNo),
+          eq(entryGroups.type, "SALE"),
+          eq(entryGroups.is_deleted, false)
+        )
+      )
+      .limit(1);
+  }
+
+  const saleGroup = matchingSaleGroup[0];
+  let saleEntries: any[] = [];
+  if (saleGroup) {
+    saleEntries = await db
+      .select({
+        entry: entriesTable,
+        item_name: itemsTable.name,
+        item_type: itemsTable.type,
+      })
+      .from(entriesTable)
+      .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+      .where(eq(entriesTable.group_id, saleGroup.id));
+  }
+
+  // Fetch opening balance at the time of the transaction (excluding the transaction itself)
+  const opening = await getAggregateBalances(
+    tx.group.account_id,
+    new Date(tx.group.created_at),
+    tx.group.id
+  );
+
+  const [lastGroup] = await db
+    .select({ rate_per_gram: entryGroups.rate_per_gram })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.account_id, tx.group.account_id),
+        eq(entryGroups.is_deleted, false),
+        not(eq(entryGroups.type, "REVERSAL")),
+        isNotNull(entryGroups.rate_per_gram),
+        sql`created_at < ${new Date(tx.group.created_at).toISOString()}`
+      )
+    )
+    .orderBy(desc(entryGroups.created_at))
+    .limit(1);
+
+  // Separate entries by item type
   const goldEntries = tx.entries.filter((e) => e.item_type === "GOLD");
   const ornamentEntries = tx.entries.filter((e) => e.item_type === "ORNAMENT");
   const moneyEntries = tx.entries.filter((e) => e.item_type === "MONEY");
 
-  return { ...tx, goldEntries, ornamentEntries, moneyEntries };
+  return {
+    ...tx,
+    goldEntries,
+    ornamentEntries,
+    moneyEntries,
+    openingPure: opening.balancePure.toString(),
+    openingCash: opening.totalCash.toString(),
+    lastRate: lastGroup?.rate_per_gram || "0",
+    matchingSale: saleGroup ? {
+      group: saleGroup,
+      entries: saleEntries
+    } : null
+  };
 }
 
 export async function createPurchase(

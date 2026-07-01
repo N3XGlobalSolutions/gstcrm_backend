@@ -13,17 +13,17 @@ import {
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
 import { entries as entriesTable, items as itemsTable, entryGroups, labourBillCycles, accounts } from "@/db/schema";
-import { inArray, eq, and, max, desc, sql } from "drizzle-orm";
+import { inArray, eq, and, max, desc, sql, not, isNotNull } from "drizzle-orm";
 import type { z } from "zod";
-import type {
-  ListTxSchema,
-  GetByIdSchema,
+import {
   CreateLabourBillSchema,
   UpdateLabourBillSchema,
-  DeleteTxSchema,
-  CreateCycleSchema,
-  ListCyclesSchema,
-  GetCycleDetailSchema,
+  type ListTxSchema,
+  type GetByIdSchema,
+  type DeleteTxSchema,
+  type CreateCycleSchema,
+  type ListCyclesSchema,
+  type GetCycleDetailSchema,
 } from "./schema";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
@@ -214,7 +214,34 @@ export async function listLabourBills(input: z.infer<typeof ListTxSchema>) {
 export async function getLabourBillById(input: z.infer<typeof GetByIdSchema>) {
   const tx = await getTransactionById(input.id);
   if (!tx) throw new AppError("NOT_FOUND", "Labour bill not found");
-  return tx;
+
+  const opening = await getAggregateBalances(
+    tx.group.account_id,
+    new Date(tx.group.created_at),
+    tx.group.id
+  );
+
+  const [lastGroup] = await db
+    .select({ rate_per_gram: entryGroups.rate_per_gram })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.account_id, tx.group.account_id),
+        eq(entryGroups.is_deleted, false),
+        not(eq(entryGroups.type, "REVERSAL")),
+        isNotNull(entryGroups.rate_per_gram),
+        sql`created_at < ${new Date(tx.group.created_at).toISOString()}`
+      )
+    )
+    .orderBy(desc(entryGroups.created_at))
+    .limit(1);
+
+  return {
+    ...tx,
+    openingPure: opening.balancePure.toString(),
+    openingCash: opening.totalCash.toString(),
+    lastRate: lastGroup?.rate_per_gram || "0"
+  };
 }
 
 // ─── createLabourBill ─────────────────────────────────────────────────────────
@@ -223,6 +250,9 @@ export async function createLabourBill(
   input: z.infer<typeof CreateLabourBillSchema>,
   options?: { existingBillNo?: number; existingEntryNo?: number }
 ) {
+  // ── Always validate input regardless of call path (tRPC or direct) ──────────
+  const validated = CreateLabourBillSchema.parse(input);
+  const safeInput = { ...input, ...validated };
   let cycleBillNo: number | undefined;
   if (input.bill_cycle_id) {
     const [cycle] = await db
@@ -422,6 +452,9 @@ export async function createLabourBill(
 // ─── updateLabourBill ─────────────────────────────────────────────────────────
 
 export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSchema>) {
+  // ── Always validate input regardless of call path (tRPC or direct) ──────────
+  UpdateLabourBillSchema.parse(input);
+
   const [originalGroup] = await db
     .select({
       bill_no: entryGroups.bill_no,

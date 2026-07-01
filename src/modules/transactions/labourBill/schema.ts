@@ -27,12 +27,19 @@ export const GetCycleDetailSchema = z.object({
 });
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
-const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
-const nonNegativeDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0, "Must be non-negative");
+const positiveDecimalSchema = z.string().refine(
+  v => !isNaN(parseFloat(v)) && parseFloat(v) > 0,
+  "Must be a positive number (greater than zero)"
+);
+const nonNegativeDecimalSchema = z.string().refine(
+  v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0,
+  "Must be a non-negative number"
+);
+// strict bounds: purity must be in range (0, 100] — blocks > 100% and zero
 const puritySchema = z.string().refine(v => {
   const p = parseFloat(v);
   return !isNaN(p) && p > 0 && p <= 100;
-}, "Purity must be between 0.01% and 100%");
+}, "Purity must be between 0.01% and 100% — values above 100% are not permitted");
 
 // ─── Gold item (Issue or Receipt) ─────────────────────────────────────────────
 const GoldItemSchema = z.object({
@@ -61,15 +68,19 @@ const OrnamentItemSchema = z.object({
 // ─── Partial cash conversion ───────────────────────────────────────────────────
 // Converts some pure gold owed by goldsmith into a cash debt
 const CashConversionSchema = z.object({
-  gold_grams: positiveDecimalSchema,        // pure gold grams being converted
-  rate_per_gram: positiveDecimalSchema,     // rate applied
-  cash_amount: positiveDecimalSchema,       // = gold_grams × rate_per_gram (pre-computed by frontend)
-});
+  gold_grams: positiveDecimalSchema,        // pure gold grams being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,     // rate applied — must be > 0 (zero-rate conversions blocked)
+  cash_amount: positiveDecimalSchema,       // = gold_grams × rate_per_gram (pre-computed by frontend) — must be > 0
+}).refine(
+  d => Math.abs(parseFloat(d.gold_grams) * parseFloat(d.rate_per_gram) - parseFloat(d.cash_amount)) < 0.01,
+  { message: "cash_amount must equal gold_grams × rate_per_gram (within ₹0.01 tolerance)", path: ["cash_amount"] }
+);
 
 // ─── CreateLabourBill ──────────────────────────────────────────────────────────
 export const CreateLabourBillSchema = z.object({
   account_id: z.string().uuid(),
   date: dateSchema,
+  // rate_per_gram: positiveDecimalSchema enforces > 0 — zero rates blocked
   rate_per_gram: positiveDecimalSchema.optional(),
   remarks: z.string().optional(),
 
@@ -83,12 +94,12 @@ export const CreateLabourBillSchema = z.object({
   ornament_receipt: z.array(OrnamentItemSchema).default([]),// Goldsmith → SHOP
 
   // Cash settlements
-  bank_paid:         nonNegativeDecimalSchema.optional(), // SHOP pays goldsmith (cash out)
+  bank_paid:         positiveDecimalSchema.optional(), // SHOP pays goldsmith (cash out) — must be > 0 if provided
   bank_paid_details: z.string().optional(),
-  bank_receive:         nonNegativeDecimalSchema.optional(), // Goldsmith pays SHOP (cash in)
+  bank_receive:         positiveDecimalSchema.optional(), // Goldsmith pays SHOP (cash in) — must be > 0 if provided
   bank_receive_details: z.string().optional(),
-  discount:             nonNegativeDecimalSchema.optional(),
-  tds:                  nonNegativeDecimalSchema.optional(),
+  discount:             positiveDecimalSchema.optional(), // must be > 0 if provided
+  tds:                  positiveDecimalSchema.optional(), // must be > 0 if provided
 
   // Partial gold-to-cash conversions (each converts slip pure into cash debt)
   cash_conversions: z.array(CashConversionSchema).default([]),

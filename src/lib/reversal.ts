@@ -66,7 +66,7 @@ export async function reverseEntryGroup(originalGroupId: string) {
         amount: e.amount ?? undefined,
         remarks: e.remarks ?? undefined,
       })),
-    });
+    }, tx);
 
     // Step 5 — Mark original as reversed
     await tx

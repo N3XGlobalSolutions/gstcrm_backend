@@ -110,7 +110,70 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
 export async function getSaleById(input: z.infer<typeof GetByIdSchema>) {
   const tx = await getTransactionById(input.id);
   if (!tx) throw new AppError("NOT_FOUND", "Sale not found");
-  return tx;
+
+  const billNo = tx.group.bill_no;
+  let matchingPurchaseGroup: any[] = [];
+  if (billNo !== null) {
+    matchingPurchaseGroup = await db
+      .select()
+      .from(entryGroups)
+      .where(
+        and(
+          eq(entryGroups.account_id, tx.group.account_id),
+          eq(entryGroups.bill_no, billNo),
+          eq(entryGroups.type, "PURCHASE"),
+          eq(entryGroups.is_deleted, false)
+        )
+      )
+      .limit(1);
+  }
+
+  const purchaseGroup = matchingPurchaseGroup[0];
+  let purchaseEntries: any[] = [];
+  if (purchaseGroup) {
+    purchaseEntries = await db
+      .select({
+        entry: entriesTable,
+        item_name: itemsTable.name,
+        item_type: itemsTable.type,
+      })
+      .from(entriesTable)
+      .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+      .where(eq(entriesTable.group_id, purchaseGroup.id));
+  }
+
+  // Fetch opening balance at the time of the transaction (excluding the transaction itself)
+  const opening = await getAggregateBalances(
+    tx.group.account_id,
+    new Date(tx.group.created_at),
+    tx.group.id
+  );
+
+  const [lastGroup] = await db
+    .select({ rate_per_gram: entryGroups.rate_per_gram })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.account_id, tx.group.account_id),
+        eq(entryGroups.is_deleted, false),
+        not(eq(entryGroups.type, "REVERSAL")),
+        isNotNull(entryGroups.rate_per_gram),
+        sql`created_at < ${new Date(tx.group.created_at).toISOString()}`
+      )
+    )
+    .orderBy(desc(entryGroups.created_at))
+    .limit(1);
+
+  return {
+    ...tx,
+    openingPure: opening.balancePure.toString(),
+    openingCash: opening.totalCash.toString(),
+    lastRate: lastGroup?.rate_per_gram || "0",
+    matchingPurchase: purchaseGroup ? {
+      group: purchaseGroup,
+      entries: purchaseEntries
+    } : null
+  };
 }
 
 export async function createSale(
