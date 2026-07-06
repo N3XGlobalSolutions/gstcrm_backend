@@ -84,8 +84,11 @@ export const CreateLabourBillSchema = z.object({
   rate_per_gram: positiveDecimalSchema.optional(),
   remarks: z.string().optional(),
 
-  // Bill Cycle: the permanent ledger this entry belongs to
-  bill_cycle_id: z.string().uuid().optional(),
+  // Bill Cycle: the permanent ledger this entry belongs to.
+  // REQUIRED — a labour bill must always be posted inside a cycle. Without it the
+  // entry builder would fall back to auto-numbering bill_no (MAX+1), producing a
+  // phantom "bill" that maps to no real cycle. See createLabourBill guard.
+  bill_cycle_id: z.string().uuid({ message: "A bill cycle must be selected before saving a labour bill." }),
 
   // 4-direction stock entries (all between SHOP and GOLDSMITH)
   gold_issue:       z.array(GoldItemSchema).default([]),    // SHOP → Goldsmith

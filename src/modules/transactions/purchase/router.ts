@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { generateBillNo } from "@/lib/transactionQueries";
+import { notifyBillEdited } from "@/modules/notifications/service";
 import {
   ListTxSchema,
   GetByIdSchema,
@@ -37,7 +38,11 @@ export const purchaseRouter = router({
     return { entryNo: String(nextEntryNo), billNo: nextBillNo };
   }),
   create: guardedProcedure("purchase", "purchase", "edit").input(CreatePurchaseSchema).mutation(async ({ input }) => createPurchase(input)),
-  update: guardedProcedure("purchase", "purchase", "edit").input(UpdatePurchaseSchema).mutation(async ({ input }) => updatePurchase(input)),
+  update: guardedProcedure("purchase", "purchase", "edit").input(UpdatePurchaseSchema).mutation(async ({ input, ctx }) => {
+    const result = await updatePurchase(input);
+    await notifyBillEdited("Purchase Bill", result.group.bill_no, ctx.user!);
+    return result;
+  }),
   delete: guardedProcedure("purchase", "purchase", "delete").input(DeleteTxSchema).mutation(async ({ input }) => deletePurchase(input)),
   updateGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(UpdateGSTPurchaseConversionSchema).mutation(async ({ input }) => updateGSTPurchaseConversion(input)),
   undoGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTPurchaseConversion(input.id)),

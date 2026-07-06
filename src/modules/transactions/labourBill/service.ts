@@ -253,17 +253,33 @@ export async function createLabourBill(
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   const validated = CreateLabourBillSchema.parse(input);
   const safeInput = { ...input, ...validated };
-  let cycleBillNo: number | undefined;
-  if (input.bill_cycle_id) {
-    const [cycle] = await db
-      .select({ bill_no: labourBillCycles.bill_no })
-      .from(labourBillCycles)
-      .where(eq(labourBillCycles.id, input.bill_cycle_id))
-      .limit(1);
-    if (cycle) {
-      cycleBillNo = cycle.bill_no;
-    }
+
+  // ── Bill cycle is mandatory ──────────────────────────────────────────────────
+  // A labour bill must always live inside a cycle. If bill_cycle_id is missing the
+  // entry builder falls back to auto-numbering bill_no (MAX+1), producing a phantom
+  // "bill" that maps to no real cycle. Guard here so BOTH the tRPC create path and
+  // the update path (which recreates via this function) are covered.
+  if (!input.bill_cycle_id) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "A bill cycle must be selected before saving a labour bill.",
+    );
   }
+  const [cycle] = await db
+    .select({ bill_no: labourBillCycles.bill_no, account_id: labourBillCycles.account_id })
+    .from(labourBillCycles)
+    .where(eq(labourBillCycles.id, input.bill_cycle_id))
+    .limit(1);
+  if (!cycle) {
+    throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.");
+  }
+  if (cycle.account_id !== input.account_id) {
+    throw new AppError(
+      "BUSINESS_RULE_VIOLATION",
+      "Selected bill cycle belongs to a different goldsmith.",
+    );
+  }
+  const cycleBillNo: number = cycle.bill_no;
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
@@ -437,7 +453,7 @@ export async function createLabourBill(
     type: "LABOUR_BILL",
     accountId: input.account_id,
     date: input.date,
-    billNo: cycleBillNo !== undefined ? cycleBillNo : options?.existingBillNo,
+    billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
     entryNo: options?.existingEntryNo,
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,

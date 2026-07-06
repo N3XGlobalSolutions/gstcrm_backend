@@ -1,4 +1,5 @@
 import { router, guardedProcedure } from "@/lib/trpc";
+import { notifyBillEdited } from "@/modules/notifications/service";
 import {
   ListTxSchema,
   GetByIdSchema,
@@ -24,7 +25,11 @@ export const labourBillRouter = router({
   list:     guardedProcedure("labourBill", "labourBill", "view").input(ListTxSchema).query(async ({ input }) => listLabourBills(input)),
   getById:  guardedProcedure("labourBill", "labourBill", "view").input(GetByIdSchema).query(async ({ input }) => getLabourBillById(input)),
   create:   guardedProcedure("labourBill", "labourBill", "edit").input(CreateLabourBillSchema).mutation(async ({ input }) => createLabourBill(input)),
-  update:   guardedProcedure("labourBill", "labourBill", "edit").input(UpdateLabourBillSchema).mutation(async ({ input }) => updateLabourBill(input)),
+  update:   guardedProcedure("labourBill", "labourBill", "edit").input(UpdateLabourBillSchema).mutation(async ({ input, ctx }) => {
+    const result = await updateLabourBill(input);
+    await notifyBillEdited("Labour Bill", result.group.bill_no, ctx.user!);
+    return result;
+  }),
   delete:   guardedProcedure("labourBill", "labourBill", "delete").input(DeleteTxSchema).mutation(async ({ input }) => deleteLabourBill(input)),
 
   // Bill Cycle routes
