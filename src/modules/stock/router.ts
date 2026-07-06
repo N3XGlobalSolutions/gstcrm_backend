@@ -7,6 +7,7 @@ import { items, accounts } from "@/db/schema";
 import { eq, and, or } from "drizzle-orm";
 import { SYSTEM_ACCOUNTS } from "@/config/constants";
 import { createEntryGroup } from "@/lib/entryBuilder";
+import { getIncomeStatement } from "@/modules/reports/incomeStatement";
 import { TRPCError } from "@trpc/server";
 
 // ─── stock.getSummary ─────────────────────────────────────────────────────────
@@ -92,20 +93,27 @@ async function getSummary() {
     }
   }
 
-  // 4. Profit / Loss
+  // 4. Net Gold Movement (NOT profit — see note below)
+  // This is Σ(pure sold) − Σ(pure purchased): a net inventory-flow figure, not
+  // profit. Real net profit is computed by the income-statement report. We
+  // accumulate with .plus() (not assign) so it stays correct even if the grouped
+  // query ever returns more than one row per type.
   let salesPure = toDecimal("0");
   let purchasesPure = toDecimal("0");
   for (const row of profitLossRows) {
-    if (row.type === "SALE") salesPure = toDecimal(row.pure_quantity || "0");
-    if (row.type === "PURCHASE") purchasesPure = toDecimal(row.pure_quantity || "0");
+    if (row.type === "SALE") salesPure = salesPure.plus(toDecimal(row.pure_quantity || "0"));
+    if (row.type === "PURCHASE") purchasesPure = purchasesPure.plus(toDecimal(row.pure_quantity || "0"));
   }
-  const profit_loss_pure = salesPure.minus(purchasesPure);
+  const net_gold_movement = salesPure.minus(purchasesPure);
 
   return {
     gold_total_pure: gold_total_pure.toFixed(3),
     ornaments_in_stock,
     mc_gold_total: mc_gold_total.toFixed(3),
-    profit_loss_pure: profit_loss_pure.toFixed(3),
+    // net_gold_movement is the honest name; profit_loss_pure kept as an alias for
+    // backward compatibility with the existing frontend until Phase 4 rewires it.
+    net_gold_movement: net_gold_movement.toFixed(3),
+    profit_loss_pure: net_gold_movement.toFixed(3),
   };
 }
 
@@ -571,7 +579,7 @@ async function getExportData() {
     "Date Added": new Date(row.created_at).toLocaleDateString("en-IN"),
   }));
 
-  const profitLossLots = profitLossData.map((row, index) => {
+  const profitLossLots = profitLossData.map((row) => {
     const isPurchase = row.group.type === "PURCHASE";
     const quantity = toDecimal(row.entry.quantity);
     const purity = toDecimal(row.entry.average_touch || row.entry.purity || "0");
@@ -580,7 +588,8 @@ async function getExportData() {
     const total = pure.mul(rate);
 
     return {
-      "Entry No": String(index + 1).padStart(3, "0"),
+      // Real ledger entry_no (per-type sequence), not a fabricated running index.
+      "Entry No": row.group.entry_no != null ? String(row.group.entry_no) : "-",
       "Type": isPurchase ? "Purchase" : "Sale",
       "Bill No": String(row.group.bill_no ?? 0),
       "Date": new Date(row.group.date).toLocaleDateString("en-IN"),
@@ -610,12 +619,19 @@ const PageSchema = z.object({
   limit: z.number().int().min(1).max(100).default(20),
 });
 
+const IncomeStatementSchema = z.object({
+  range: z.enum(["today", "week", "month", "year", "all", "custom"]).default("month"),
+  from_date: z.string().optional(),
+  to_date: z.string().optional(),
+});
+
 export const stockRouter = router({
   getSummary: protectedProcedure.query(async () => getSummary()),
   getGoldStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getGoldStock(input)),
   getOrnamentStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getOrnamentStock(input)),
   getMcGoldStock: protectedProcedure.query(async () => getMcGoldStock()),
   getProfitLossStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getProfitLossStock(input)),
+  getIncomeStatement: protectedProcedure.input(IncomeStatementSchema).query(async ({ input }) => getIncomeStatement(input)),
   getExportData: protectedProcedure.query(async () => getExportData()),
   addOpeningStock: guardedProcedure("stock", "stock", "edit")
     .input(AddOpeningStockSchema)

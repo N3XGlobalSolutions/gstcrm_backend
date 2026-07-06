@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { entries, entryGroups, notifications } from "@/db/schema";
 import { eq, and, gte, lte, count, sql, desc } from "drizzle-orm";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
+import { resolveDateRange } from "@/lib/dateRange";
 
 // ─── dashboard.getMetrics ─────────────────────────────────────────────────────
 
@@ -13,29 +14,10 @@ const MetricsSchema = z.object({
   to_date: z.string().optional(),
 });
 
-async function getDateRange(input: z.infer<typeof MetricsSchema>) {
-  const now = new Date();
-  if (input.range === "today") {
-    const d = now.toISOString().split("T")[0]!;
-    return { from: d, to: d };
-  }
-  if (input.range === "week") {
-    const from = new Date(now);
-    from.setDate(from.getDate() - 7);
-    return { from: from.toISOString().split("T")[0]!, to: now.toISOString().split("T")[0]! };
-  }
-  if (input.range === "month") {
-    const from = new Date(now.getFullYear(), now.getMonth(), 1);
-    return { from: from.toISOString().split("T")[0]!, to: now.toISOString().split("T")[0]! };
-  }
-  return {
-    from: input.from_date ?? now.toISOString().split("T")[0]!,
-    to: input.to_date ?? now.toISOString().split("T")[0]!,
-  };
-}
-
 async function getMetrics(input: z.infer<typeof MetricsSchema>) {
-  const { from, to } = await getDateRange(input);
+  // dashboard only uses today/week/month/custom, which always resolve to
+  // concrete dates (never null), so the non-null assertion is safe here.
+  const { from, to } = resolveDateRange(input) as { from: string; to: string };
 
   const [total_sales, total_purchase, total_stock_sales, total_job_work, total_labour_bill, total_expense] =
     await Promise.all([
