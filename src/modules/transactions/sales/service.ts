@@ -198,7 +198,13 @@ export async function createSale(
     const totalQuantity = toDecimal(item.quantity).plus(wastageQty);
     const totalQuantityStr = toQuantityString(totalQuantity);
 
-    return { ...item, totalQuantityStr, wastageQty: toQuantityString(wastageQty) };
+    // Gross pure = (physical weight + wastage) × touch/100. This is the VALUE the
+    // customer is billed for (wastage = the shop's profit). It is written to the
+    // ledger as a pure_quantity override, while only the PHYSICAL weight leaves
+    // stock — wastage on a sale must never be deducted from physical gold.
+    const grossPureStr = toQuantityString(totalQuantity.mul(toDecimal(item.purity).div(100)));
+
+    return { ...item, totalQuantityStr, grossPureStr, wastageQty: toQuantityString(wastageQty) };
   });
 
   // Steps 5–7 inside one transaction so the SELECT FOR UPDATE lock is held
@@ -308,10 +314,12 @@ export async function createSale(
                   AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
           );
           const available = toDecimal(row?.available ?? "0");
-          if (available.lt(toDecimal(item.totalQuantityStr))) {
+          // Only the PHYSICAL weight is checked/consumed — wastage is a profit
+          // line billed via pure_quantity, not physical gold leaving the lot.
+          if (available.lt(toDecimal(item.quantity))) {
             throw new AppError(
               "BUSINESS_RULE_VIOLATION",
-              `Insufficient stock for ornament ${itemMeta.name} in lot ${item.lot_id}. Available: ${available.toFixed(3)}g, Required: ${item.totalQuantityStr}g`,
+              `Insufficient stock for ornament ${itemMeta.name} in lot ${item.lot_id}. Available: ${available.toFixed(3)}g, Required: ${item.quantity}g`,
             );
           }
         } else {
@@ -329,10 +337,11 @@ export async function createSale(
                   AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
           );
           const available = toDecimal(row?.available ?? "0");
-          if (available.lt(toDecimal(item.totalQuantityStr))) {
+          // Physical weight only (see ornament branch) — wastage is profit, not gold.
+          if (available.lt(toDecimal(item.quantity))) {
             throw new AppError(
               "BUSINESS_RULE_VIOLATION",
-              `Insufficient stock for item ${itemMeta.name}. Available: ${available.toFixed(3)}g, Required: ${item.totalQuantityStr}g`,
+              `Insufficient stock for item ${itemMeta.name}. Available: ${available.toFixed(3)}g, Required: ${item.quantity}g`,
             );
           }
         }
@@ -357,7 +366,11 @@ export async function createSale(
         toAccountId: input.account_id,
         itemId: item.item_id,
         lotId: item.lot_id,
-        quantity: item.totalQuantityStr, // quantity + wastage
+        // Wastage on a SALE is a PROFIT line, not physical gold. Only the physical
+        // weight leaves stock; the customer is billed for the gross pure
+        // (weight + wastage) × touch/100 via the pure_quantity override.
+        quantity: item.quantity,          // physical weight only → correct stock
+        pureQuantity: item.grossPureStr,  // (weight + wastage) × touch/100 → billed value
         purity: item.purity,
         wastageMode: item.wastage_mode as "PERCENT" | "GRAM",
         wastageValue: item.wastage_value,

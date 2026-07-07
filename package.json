@@ -13,6 +13,10 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
     "test": "bun test --preload ./src/__tests__/setup.ts",
+    "test:fullcycle": "node scripts/fulltest/run.mjs",
+    "test:fullcycle:keep": "node scripts/fulltest/run.mjs --keep",
+    "test:fullcycle:setup": "node scripts/fulltest/provision.mjs create",
+    "test:fullcycle:teardown": "node scripts/fulltest/provision.mjs drop",
     "test:unit": "bun test --preload ./src/__tests__/setup.ts src/modules/auth/__tests__/schema.test.ts src/modules/auth/__tests__/jwt.test.ts",
     "test:integration": "bun test --preload ./src/__tests__/setup.ts src/modules/auth/__tests__/router.test.ts"
   },
