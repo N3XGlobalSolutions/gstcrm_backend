@@ -89,7 +89,7 @@ export async function generateLotId(tx: DbOrTx): Promise<string> {
 
   // Use sql template literal for safe execution.
   const result = await (tx as Database).execute(
-    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) + 1 AS next_lot_no FROM entries WHERE lot_id IS NOT NULL`,
+    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) + 1 AS next_lot_no FROM entries WHERE lot_id LIKE 'LOT-%'`,
   );
 
   const rows = result as unknown as Array<{ next_lot_no: string | number | null }>;
@@ -112,7 +112,7 @@ export async function generateLotIds(tx: DbOrTx, count: number): Promise<string[
   );
 
   const result = await (tx as Database).execute(
-    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) AS max_lot_no FROM entries WHERE lot_id IS NOT NULL`,
+    sql`SELECT COALESCE(MAX(CAST(SUBSTRING(lot_id FROM 5) AS INTEGER)), 0) AS max_lot_no FROM entries WHERE lot_id LIKE 'LOT-%'`,
   );
 
   const rows = result as unknown as Array<{ max_lot_no: string | number | null }>;

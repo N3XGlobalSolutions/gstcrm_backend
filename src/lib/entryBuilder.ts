@@ -131,7 +131,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         const toAccountType = toAccount?.type;
         const toCustomerType = toAccount?.customer_type;
         if (
-          (itemType === "GOLD" || itemType === "ORNAMENT") &&
+          itemType === "ORNAMENT" &&
           (
             toAccountType === "SHOP" ||
             toAccountType === "GOLDSMITH" ||
@@ -190,7 +190,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         const toAccountType = toAccount?.type;
         const toCustomerType = toAccount?.customer_type;
         if (
-          (itemType === "GOLD" || itemType === "ORNAMENT") &&
+          itemType === "ORNAMENT" &&
           (
             toAccountType === "SHOP" ||
             toAccountType === "GOLDSMITH" ||
