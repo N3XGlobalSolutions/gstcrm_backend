@@ -344,6 +344,7 @@ const backupRouter = router({
         const tablesToWipe = [
           "entries",
           "entry_groups",
+          "labour_bill_cycles",
           "gst_sales_history",
           "gst_purchase_history",
           "print_templates",
