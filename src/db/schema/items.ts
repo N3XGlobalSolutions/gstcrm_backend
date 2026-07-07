@@ -3,6 +3,7 @@ import {
   uuid,
   integer,
   varchar,
+  numeric,
   timestamp,
   boolean,
   pgEnum,
@@ -22,6 +23,7 @@ export const items = pgTable("items", {
   name: varchar("name", { length: 100 }).notNull(),
   type: itemTypeEnum("type").notNull(),
   unit: itemUnitEnum("unit").notNull(),
+  touch: numeric("touch", { precision: 6, scale: 3 }),
   is_deleted: boolean("is_deleted").default(false).notNull(),
   created_at: timestamp("created_at", { withTimezone: true })
     .defaultNow()

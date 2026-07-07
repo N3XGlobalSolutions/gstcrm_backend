@@ -82,17 +82,22 @@ export async function insertItem(values: {
   name: string;
   type: "GOLD" | "ORNAMENT" | "MONEY";
   unit: "GRAM" | "PIECE" | "RUPEE";
+  touch?: number | null;
 }) {
-  const [item] = await db.insert(items).values(values).returning();
+  const { touch, ...rest } = values;
+  const [item] = await db
+    .insert(items)
+    .values({ ...rest, touch: touch != null ? String(touch) : undefined })
+    .returning();
   return item!;
 }
 
 // ─── updateItem ──────────────────────────────────────────────────────────────
 
-export async function updateItemName(id: string, name: string) {
+export async function updateItemName(id: string, name: string, touch?: number | null) {
   const [item] = await db
     .update(items)
-    .set({ name, updated_at: new Date() })
+    .set({ name, touch: touch !== undefined ? String(touch) : undefined, updated_at: new Date() })
     .where(eq(items.id, id))
     .returning();
   return item!;

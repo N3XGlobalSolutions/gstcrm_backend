@@ -15,6 +15,7 @@ export const CreateItemSchema = z.object({
   name: z.string().min(1).max(100),
   type: z.enum(["GOLD", "ORNAMENT"]), // MONEY is system-only
   unit: z.enum(["GRAM", "PIECE"]),    // RUPEE is system-only
+  touch: z.number().positive().optional(),
 });
 
 // ─── items.update ─────────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@ export const CreateItemSchema = z.object({
 export const UpdateItemSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(100),
+  touch: z.number().positive().optional().nullable(),
 });
 
 // ─── items.delete ─────────────────────────────────────────────────────────────

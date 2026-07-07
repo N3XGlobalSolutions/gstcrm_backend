@@ -1,6 +1,6 @@
 import { router, protectedProcedure, guardedProcedure } from "@/lib/trpc";
 import { z } from "zod";
-import { getBalances, getLotBalances, getAccountLotBalances, getAllGoldsmithsLotBalances } from "@/lib/balance";
+import { getBalances, getLotBalances, getAccountLotBalances, getAccountItemBalances, getAllGoldsmithsLotBalances } from "@/lib/balance";
 import { toDecimal, type Decimal } from "@/lib/decimal";
 import { db } from "@/db";
 import { items, accounts } from "@/db/schema";
@@ -119,7 +119,7 @@ async function getSummary() {
 
 // ─── stock.getGoldStock ───────────────────────────────────────────────────────
 
-async function getGoldStock(input: { page: number; limit: number }) {
+export async function getGoldStock(input: { page: number; limit: number }) {
   const goldItems = await db
     .select()
     .from(items)
@@ -127,33 +127,38 @@ async function getGoldStock(input: { page: number; limit: number }) {
     .orderBy(items.entry_no);
 
   const goldItemIds = goldItems.map((item) => item.id);
-  const lots = await getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds);
+  // Pooled mode: sum all entries per item_id, ignoring lot_id
+  const itemBalances = await getAccountItemBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds);
 
-  const flatLots = lots.map((lot) => {
-    const item = goldItems.find((i) => i.id === lot.item_id)!;
-    const qty = Number(lot.quantity);
-    const pur = lot.purity ? Number(lot.purity) : null;
-    const pureQty = lot.pure_quantity ? Number(lot.pure_quantity) : null;
-    return {
-      item,
-      lot_id: lot.lot_id,
-      balance: isNaN(qty) ? '0.000' : lot.quantity.toFixed(3),
-      purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined,
-      average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined),
-      pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(3) : undefined,
-      created_at: lot.created_at,
-    };
-  });
+  const flatItems = itemBalances
+    .filter((bal) => bal.quantity.gt(toDecimal("0")))
+    .map((bal) => {
+      const item = goldItems.find((i) => i.id === bal.item_id)!;
+      const qty = Number(bal.quantity);
+      const pur = bal.purity ? Number(bal.purity) : null;
+      const pureQty = bal.pure_quantity ? Number(bal.pure_quantity) : null;
+      return {
+        item,
+        lot_id: null as string | null,  // no lot in pooled mode
+        balance: isNaN(qty) ? '0.000' : bal.quantity.toFixed(3),
+        purity: pur !== null && !isNaN(pur) ? bal.purity!.toFixed(2) : undefined,
+        average_touch: bal.average_touch
+          ? bal.average_touch.toFixed(2)
+          : (pur !== null && !isNaN(pur) ? bal.purity!.toFixed(2) : undefined),
+        pure_balance: pureQty !== null && !isNaN(pureQty) ? bal.pure_quantity!.toFixed(3) : undefined,
+        created_at: bal.created_at,
+      };
+    });
 
-  // Newest purchases first — so page 1 always shows the latest stock
-  flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+  // Preserve item master order (entry_no)
+  flatItems.sort((a, b) => (a.item.entry_no ?? 0) - (b.item.entry_no ?? 0));
   const offset = (input.page - 1) * input.limit;
-  return { data: flatLots.slice(offset, offset + input.limit), total: flatLots.length };
+  return { data: flatItems.slice(offset, offset + input.limit), total: flatItems.length };
 }
 
 // ─── stock.getOrnamentStock ───────────────────────────────────────────────────
 
-async function getOrnamentStock(input: { page: number; limit: number }) {
+export async function getOrnamentStock(input: { page: number; limit: number }) {
   const ornamentItems = await db
     .select()
     .from(items)

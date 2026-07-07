@@ -71,6 +71,13 @@
       "when": 1782900000000,
       "tag": "0009_labour_bill_cycles",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783000000000,
+      "tag": "0010_items_touch_column",
+      "breakpoints": true
     }
   ]
 }

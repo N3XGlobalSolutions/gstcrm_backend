@@ -274,33 +274,70 @@ export async function createSale(
         );
       }
     }
-    // Step 5 — Lock entry rows then read lot balance within the same transaction in parallel
+    // Step 5 — Lock entry rows then check stock availability
+    // Gold: Checked in pooled mode (all lots combined).
+    // Ornament: Checked per specific lot_id (lot_id is strictly required).
+    const dbItems = await tx
+      .select({ id: itemsTable.id, type: itemsTable.type, name: itemsTable.name })
+      .from(itemsTable)
+      .where(inArray(itemsTable.id, processedItems.map(item => item.item_id)));
+
     await Promise.all(
       processedItems.map(async (item) => {
-        await tx.execute(
-          sql`SELECT id FROM ${entries}
-              WHERE item_id = ${item.item_id}
-                AND lot_id IS NOT NULL
-                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
-              FOR UPDATE`,
-        );
-        const [row] = await tx.execute<{ available: string }>(
-          sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
-              FROM ${entries}
-              WHERE item_id = ${item.item_id}
-                AND lot_id = ${item.lot_id}
-                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
-        );
-        const available = toDecimal(row?.available ?? "0");
-        if (available.lt(toDecimal(item.totalQuantityStr))) {
-          throw new AppError(
-            "BUSINESS_RULE_VIOLATION",
-            `Insufficient stock for item ${item.item_id} in lot ${item.lot_id}`,
+        const itemMeta = dbItems.find(d => d.id === item.item_id);
+        if (!itemMeta) {
+          throw new AppError("NOT_FOUND", `Item ${item.item_id} not found`);
+        }
+
+        if (itemMeta.type === "ORNAMENT") {
+          if (!item.lot_id) {
+            throw new AppError("VALIDATION_ERROR", `Lot ID is required for ornament: ${itemMeta.name}`);
+          }
+          await tx.execute(
+            sql`SELECT id FROM ${entries}
+                WHERE item_id = ${item.item_id}
+                  AND lot_id = ${item.lot_id}
+                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
+                FOR UPDATE`,
           );
+          const [row] = await tx.execute<{ available: string }>(
+            sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
+                FROM ${entries}
+                WHERE item_id = ${item.item_id}
+                  AND lot_id = ${item.lot_id}
+                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
+          );
+          const available = toDecimal(row?.available ?? "0");
+          if (available.lt(toDecimal(item.totalQuantityStr))) {
+            throw new AppError(
+              "BUSINESS_RULE_VIOLATION",
+              `Insufficient stock for ornament ${itemMeta.name} in lot ${item.lot_id}. Available: ${available.toFixed(3)}g, Required: ${item.totalQuantityStr}g`,
+            );
+          }
+        } else {
+          // GOLD (pooled mode)
+          await tx.execute(
+            sql`SELECT id FROM ${entries}
+                WHERE item_id = ${item.item_id}
+                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
+                FOR UPDATE`,
+          );
+          const [row] = await tx.execute<{ available: string }>(
+            sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
+                FROM ${entries}
+                WHERE item_id = ${item.item_id}
+                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
+          );
+          const available = toDecimal(row?.available ?? "0");
+          if (available.lt(toDecimal(item.totalQuantityStr))) {
+            throw new AppError(
+              "BUSINESS_RULE_VIOLATION",
+              `Insufficient stock for item ${itemMeta.name}. Available: ${available.toFixed(3)}g, Required: ${item.totalQuantityStr}g`,
+            );
+          }
         }
       })
     );
-
     // Step 6 — Bill number per customer (uses tx so it's consistent with the insert)
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, input.account_id, "SALE");
 

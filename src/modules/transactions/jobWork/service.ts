@@ -141,33 +141,15 @@ export async function createJobWork(
   input: z.infer<typeof CreateJobWorkSchema>,
   options?: { existingBillNo?: number; existingEntryNo?: number }
 ) {
-  // Validate stock for all issues
+  // Validate stock for all issues (Gold is pooled, Ornaments require lots)
   for (const item of input.gold_issue) {
-    if (!item.lot_id) throw new AppError("VALIDATION_ERROR", "Lot ID is required for gold issue");
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
-    const activeLot = lots.find((l) => l.lot_id === item.lot_id);
-    const available = activeLot?.quantity ?? toDecimal("0");
-    // Sign convention allows negative stock for employee issues: if stock is 0/insufficient we can give gold
-    /*
-    if (available.lt(toDecimal(item.quantity))) {
-      throw new AppError("BUSINESS_RULE_VIOLATION", `Insufficient stock for gold issue item ${item.item_id} in lot ${item.lot_id}`);
-    }
-    */
+    // lot_id is optional in pooled mode for gold
   }
 
   for (const item of input.ornament_issue) {
     if (!item.lot_id) throw new AppError("VALIDATION_ERROR", "Lot ID is required for ornament issue");
-    const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
-    const activeLot = lots.find((l) => l.lot_id === item.lot_id);
-    const available = activeLot?.quantity ?? toDecimal("0");
-    const { totalWeightStr } = processOrnamentItem(item);
-    // Sign convention allows negative stock for employee issues: if stock is 0/insufficient we can give gold
-    /*
-    if (available.lt(toDecimal(totalWeightStr))) {
-      throw new AppError("BUSINESS_RULE_VIOLATION", `Insufficient stock for ornament issue item ${item.item_id} in lot ${item.lot_id}`);
-    }
-    */
   }
+
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 

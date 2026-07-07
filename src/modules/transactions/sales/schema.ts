@@ -24,7 +24,7 @@ const puritySchema = z.string().refine(v => {
 
 const SalesItemSchema = z.object({
   item_id: z.string().uuid(),
-  lot_id: z.string().min(1, "Lot ID is required"),
+  lot_id: z.string().optional(),
   quantity: positiveDecimalSchema,
   purity: puritySchema,
   wastage_mode: z.enum(["PERCENT", "GRAM"]),

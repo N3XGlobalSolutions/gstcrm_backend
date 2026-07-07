@@ -57,7 +57,7 @@ export async function updateItem(input: z.infer<typeof UpdateItemSchema>) {
     );
   }
 
-  return updateItemName(input.id, input.name);
+  return updateItemName(input.id, input.name, input.touch);
 }
 
 // ─── deleteItem ──────────────────────────────────────────────────────────────

@@ -418,3 +418,65 @@ export async function getAllGoldsmithsLotBalances(
     created_at: new Date(row.created_at as string | Date),
   }));
 }
+
+// ─── Pooled Item Balance (no lot grouping) ────────────────────────────────────
+// Used for pooled-stock mode: groups by item_id only, so all purchases of the
+// same item type are merged into a single running total.
+
+export interface AccountItemBalance {
+  item_id: string;
+  quantity: Decimal;
+  purity: Decimal | null;
+  average_touch: Decimal | null;
+  pure_quantity: Decimal | null;
+  created_at: Date;
+}
+
+/**
+ * Returns net stock balance grouped by item_id only (no lot_id grouping).
+ * All purchases of "92 Pure Gold" become one pool regardless of when they were bought.
+ * lot_id is still stored in entries for audit — this query simply ignores it.
+ */
+export async function getAccountItemBalances(
+  accountId: string,
+  itemIds?: string[],
+  asOfDate?: Date,
+): Promise<AccountItemBalance[]> {
+  const query = db
+    .select({
+      item_id: entries.item_id,
+      net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
+      purity: sql`MAX(${entries.purity})::text`,
+      average_touch: sql`MAX(${entries.average_touch})::text`,
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.pure_quantity} ELSE -${entries.pure_quantity} END)::text`,
+      created_at: sql`MIN(${entries.created_at})`,
+    })
+    .from(entries)
+    .where(
+      and(
+        or(
+          eq(entries.to_account_id, accountId),
+          eq(entries.from_account_id, accountId),
+        ),
+        itemIds && itemIds.length > 0 ? inArray(entries.item_id, itemIds) : undefined,
+        asOfDate ? lte(entries.created_at, asOfDate) : undefined,
+      )
+    )
+    .groupBy(entries.item_id)
+    .having(
+      sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END) != 0`
+    )
+    .orderBy(sql`MIN(${entries.created_at})`);
+
+  const result = await query;
+
+  return result.map((row) => ({
+    item_id: row.item_id!,
+    quantity: toDecimal(row.net_quantity as string),
+    purity: row.purity ? toDecimal(row.purity as string) : null,
+    average_touch: row.average_touch ? toDecimal(row.average_touch as string) : null,
+    pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity as string) : null,
+    created_at: new Date(row.created_at as string | Date),
+  }));
+}
+
