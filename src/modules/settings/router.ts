@@ -15,6 +15,7 @@ import {
   userActivityPermissions,
   companyDetails,
   taxMaster,
+  accounts,
 } from "@/db/schema";
 import {
   ListTaxMasterSchema,
@@ -26,7 +27,6 @@ import bcrypt from "bcryptjs";
 import { env } from "@/config/env";
 import { generateEntryNo as genNo } from "@/lib/entryNoGenerator";
 import { createSystemNotification } from "@/modules/notifications/service";
-import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
@@ -336,22 +336,30 @@ const backupRouter = router({
         });
       }
 
-      console.log(`🧹 Factory reset initiated by user '${ctx.user.username}'`);
+      console.log(`🧹 Factory reset (transactions only) initiated by user '${ctx.user.username}'`);
 
-      // 2. Perform factory reset inside a database transaction
+      // 2. Wipe ONLY transactional data inside a single transaction.
+      //
+      //    DELETES: stock, all bills (purchase / sale / labour / job-work + GST
+      //    history), expenses, and opening stock / opening balances.
+      //    KEEPS: accounts (parties), items, users & permissions, company
+      //    details, GST tax rates, print templates, and notifications.
+      //
+      //    Stock and expenses are not separate tables — they are derived from
+      //    `entries` / `entry_groups`, so wiping those six tables clears
+      //    everything the user asked to remove in one shot.
       await db.transaction(async (tx) => {
-        // List of transactional and logs tables to wipe completely
+        // These six tables hold every stock movement, bill, expense, and
+        // opening entry. Nothing we keep has a foreign key into them, and
+        // `entries` is the only child of `entry_groups`, so TRUNCATE ... CASCADE
+        // is safe and self-contained.
         const tablesToWipe = [
           "entries",
           "entry_groups",
           "labour_bill_cycles",
+          "job_work_cycles",
           "gst_sales_history",
           "gst_purchase_history",
-          "print_templates",
-          "tax_master",
-          "notifications",
-          "login_attempts",
-          "refresh_tokens"
         ];
 
         for (const table of tablesToWipe) {
@@ -359,96 +367,17 @@ const backupRouter = router({
           console.log(`✅ Table truncated: ${table}`);
         }
 
-        // Delete all items EXCEPT the system RUPEE item
+        // The OPENING entries (opening stock + opening balances) were deleted
+        // above. Zero the stored reference columns on every account so they stay
+        // consistent with the now-empty ledger (balances are computed from
+        // entries, so all party balances are already 0).
         await tx.execute(
-          sql`DELETE FROM items WHERE id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}`
+          sql`UPDATE accounts SET opening_pure_balance = '0', opening_cash_balance = '0'`
         );
-        console.log(`✅ Custom items deleted`);
-
-        // Delete all accounts EXCEPT system accounts
-        const systemAccountIds = [
-          SYSTEM_ACCOUNTS.SHOP_ID,
-          SYSTEM_ACCOUNTS.CASH_ID,
-          SYSTEM_ACCOUNTS.BANK_ID,
-          SYSTEM_ACCOUNTS.LOSS_ID,
-          SYSTEM_ACCOUNTS.EXPENSE_ID,
-          SYSTEM_ACCOUNTS.OPENING_STOCK_ID
-        ];
-        await tx.execute(
-          sql`DELETE FROM accounts WHERE id NOT IN (${sql.join(
-            systemAccountIds.map(id => sql`${id}`),
-            sql`, `
-          )})`
-        );
-        console.log(`✅ Custom accounts deleted`);
-
-        // Clear permissions tables before deleting users to prevent constraints violations
-        await tx.execute(sql`TRUNCATE TABLE "user_form_permissions" CASCADE`);
-        await tx.execute(sql`TRUNCATE TABLE "user_activity_permissions" CASCADE`);
-
-        // Delete all users except superadmin
-        await tx.execute(
-          sql`DELETE FROM app_users WHERE username != 'superadmin'`
-        );
-        console.log(`✅ Custom users deleted`);
-
-        // Re-seed permissions for the superadmin user
-        const adminUsers = await tx
-          .select({ id: appUsers.id })
-          .from(appUsers)
-          .where(eq(appUsers.username, "superadmin"))
-          .limit(1);
-
-        const adminUserId = adminUsers[0]?.id;
-        if (adminUserId) {
-          const MODULES_FORMS = [
-            { module: "dashboard", form_name: "dashboard" },
-            { module: "notifications", form_name: "notifications" },
-            { module: "items", form_name: "items" },
-            { module: "accounts", form_name: "accounts" },
-            { module: "transactions", form_name: "purchase" },
-            { module: "transactions", form_name: "sales" },
-            { module: "transactions", form_name: "labourBill" },
-            { module: "transactions", form_name: "jobWork" },
-            { module: "stock", form_name: "stock" },
-            { module: "expense", form_name: "expense" },
-            { module: "settings", form_name: "users" },
-            { module: "settings", form_name: "permissions" },
-            { module: "settings", form_name: "backup" },
-            { module: "settings", form_name: "company" },
-          ];
-
-          await tx.insert(userFormPermissions).values(
-            MODULES_FORMS.map((perm) => ({
-              user_id: adminUserId,
-              module: perm.module,
-              form_name: perm.form_name,
-              allowed: true,
-            }))
-          );
-
-          await tx.insert(userActivityPermissions).values({
-            user_id: adminUserId,
-            can_view: true,
-            can_edit: true,
-            can_delete: true,
-          });
-          console.log(`✅ Superadmin permissions seeded`);
-        }
-
-        // Wipe company details and re-insert default
-        await tx.execute(sql`TRUNCATE TABLE "company_details" RESTART IDENTITY CASCADE`);
-        await tx.insert(companyDetails).values({
-          company_name: "Gold Jewellers",
-          address: "",
-          phone: "",
-          email: "",
-          gst_no: "",
-          pan_no: "",
-        });
-        console.log(`✅ Company details reset`);
+        console.log(`✅ Account opening balances reset to zero`);
       });
 
+      console.log(`✅ Factory reset complete — master data preserved`);
       return { success: true };
     }),
 });
