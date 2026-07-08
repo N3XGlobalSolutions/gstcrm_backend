@@ -2,11 +2,6 @@ import { AppError } from "@/types/errors";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
 import {
-  calcWastagePercent,
-  calcWastageGram,
-  calcTotalWeight,
-  calcTotalPure,
-  subtractDecimals,
   toDecimal,
   toQuantityString,
 } from "@/lib/decimal";
@@ -17,22 +12,164 @@ import {
   getTransactionById,
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
-import { entryGroups, entries as entriesTable, items as itemsTable } from "@/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { entries as entriesTable, items as itemsTable, entryGroups, jobWorkCycles, accounts } from "@/db/schema";
+import { inArray, eq, and, max, desc, sql, not, isNotNull } from "drizzle-orm";
 import type { z } from "zod";
-import type {
-  ListTxSchema,
-  GetByIdSchema,
+import {
   CreateJobWorkSchema,
   UpdateJobWorkSchema,
-  DeleteTxSchema,
+  type ListTxSchema,
+  type GetByIdSchema,
+  type DeleteTxSchema,
+  type CreateCycleSchema,
+  type ListCyclesSchema,
+  type GetCycleDetailSchema,
 } from "./schema";
+
+// ─── Wastage formula for Job Work ornament items ──────────────────────────────
+// wastage_gm = (weight × wastage_percent/100) / (touch/100)
+// gross_weight = weight + wastage_gm
+// pure = gross_weight × (touch / 100)
+function calcOrnamentEntry(item: {
+  quantity: string;
+  purity: string;
+  stone?: string;
+  throde?: string;
+  chain?: string;
+  wastage_percent: string;
+}): { grossWeight: string; pureQuantity: string; wastageGm: string } {
+  const weight = toDecimal(item.quantity);
+  const touch = toDecimal(item.purity).div(100);
+  const wastagePercent = toDecimal(item.wastage_percent).div(100);
+
+  // wastage_gm = (weight × wastage%) / touch
+  const wastageGm = touch.gt(0)
+    ? weight.mul(wastagePercent).div(touch)
+    : toDecimal("0");
+
+  const grossWeight = weight.plus(wastageGm);
+  const pureQuantity = grossWeight.mul(touch);
+
+  return {
+    grossWeight: toQuantityString(grossWeight),
+    pureQuantity: toQuantityString(pureQuantity),
+    wastageGm: toQuantityString(wastageGm),
+  };
+}
+
+// ─── createCycle ─────────────────────────────────────────────────────────────
+// Creates a new bill cycle (permanent ledger book) for an account.
+// The bill_no is auto-incremented per-account (1, 2, 3…).
+
+export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
+  return db.transaction(async (tx) => {
+    // Lock the account row to serialize bill_no generation for this account
+    await tx.execute(
+      sql`SELECT id FROM ${accounts} WHERE id = ${input.account_id} FOR UPDATE`
+    );
+
+    // Use MAX(bill_no) + 1 per account
+    const [row] = await tx
+      .select({ max: max(jobWorkCycles.bill_no) })
+      .from(jobWorkCycles)
+      .where(eq(jobWorkCycles.account_id, input.account_id));
+
+    const nextBillNo = (row?.max ?? 0) + 1;
+
+    const [cycle] = await tx
+      .insert(jobWorkCycles)
+      .values({
+        account_id: input.account_id,
+        bill_no: nextBillNo,
+        main_reason: input.main_reason ?? null,
+      })
+      .returning();
+
+    if (!cycle) throw new AppError("INTERNAL_ERROR", "Failed to create bill cycle");
+    return cycle;
+  });
+}
+
+// ─── listCycles ───────────────────────────────────────────────────────────────
+// Returns all bill cycles for an account, ordered by bill_no descending.
+
+export async function listCycles(input: z.infer<typeof ListCyclesSchema>) {
+  const cycles = await db
+    .select()
+    .from(jobWorkCycles)
+    .where(eq(jobWorkCycles.account_id, input.account_id))
+    .orderBy(desc(jobWorkCycles.bill_no));
+
+  return cycles;
+}
+
+// ─── getCycleDetail ───────────────────────────────────────────────────────────
+// Returns a bill cycle + all its entry groups + entries, for drill-down view.
+
+export async function getCycleDetail(input: z.infer<typeof GetCycleDetailSchema>) {
+  // 1. Fetch the cycle record
+  const [cycle] = await db
+    .select()
+    .from(jobWorkCycles)
+    .where(eq(jobWorkCycles.id, input.cycle_id))
+    .limit(1);
+
+  if (!cycle) throw new AppError("NOT_FOUND", "Bill cycle not found");
+
+  // 2. Fetch all non-deleted entry groups that belong to this cycle
+  const groups = await db
+    .select({
+      group: entryGroups,
+    })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.job_work_cycle_id, input.cycle_id),
+        eq(entryGroups.is_deleted, false),
+      )
+    )
+    .orderBy(entryGroups.created_at);
+
+  if (groups.length === 0) {
+    return { cycle, groups: [] };
+  }
+
+  // 3. Fetch all entries for those groups
+  const groupIds = groups.map((g) => g.group.id);
+  const txEntries = await db
+    .select({
+      entry: entriesTable,
+      item_name: itemsTable.name,
+      item_type: itemsTable.type,
+    })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(inArray(entriesTable.group_id, groupIds));
+
+  // 4. Join entries back to groups
+  const entryMap = new Map<string, typeof txEntries>();
+  for (const e of txEntries) {
+    const gId = e.entry.group_id;
+    if (!entryMap.has(gId)) entryMap.set(gId, []);
+    entryMap.get(gId)!.push(e);
+  }
+
+  const enrichedGroups = groups.map((g) => ({
+    ...g,
+    entries: entryMap.get(g.group.id) ?? [],
+  }));
+
+  return { cycle, groups: enrichedGroups };
+}
+
+// ─── listJobWork ──────────────────────────────────────────────────────────────
 
 export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
   const result = await listTransactions("JOB_WORK", input);
 
   if (result.data.length === 0) return result;
 
+  // Batch-fetch all entries for the returned groups (same pattern as listPurchases)
   const groupIds = result.data.map((d) => d.group.id);
   const txEntries = await db
     .select({
@@ -53,6 +190,7 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
   }));
   const batchBalances = await getBatchAggregateBalances(tuples);
 
+  // Attach entries + compute opening balance per group
   const finalData = result.data.map((d) => {
     const groupEntries = txEntries.filter(
       (e) => e.entry.group_id === d.group.id,
@@ -71,90 +209,99 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
   return { ...result, data: finalData };
 }
 
+// ─── getJobWorkById ───────────────────────────────────────────────────────────
+
 export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
   const tx = await getTransactionById(input.id);
   if (!tx) throw new AppError("NOT_FOUND", "Job work not found");
 
-  // Split entries into 4 arrays per plan §12.5
-  const goldIssue = tx.entries.filter(
-    (e) => e.item_type === "GOLD" && e.entry.from_account_id === SYSTEM_ACCOUNTS.SHOP_ID,
-  );
-  const goldReceipt = tx.entries.filter(
-    (e) => e.item_type === "GOLD" && e.entry.to_account_id === SYSTEM_ACCOUNTS.SHOP_ID,
-  );
-  const ornamentIssue = tx.entries.filter(
-    (e) => e.item_type === "ORNAMENT" && e.entry.from_account_id === SYSTEM_ACCOUNTS.SHOP_ID,
-  );
-  const ornamentReceipt = tx.entries.filter(
-    (e) => e.item_type === "ORNAMENT" && e.entry.to_account_id === SYSTEM_ACCOUNTS.SHOP_ID,
+  const opening = await getAggregateBalances(
+    tx.group.account_id,
+    new Date(tx.group.created_at),
+    tx.group.id
   );
 
-  return { ...tx, goldIssue, goldReceipt, ornamentIssue, ornamentReceipt };
-}
-
-// ─── Process ornament item per plan §12.5 Step 1 ─────────────────────────────
-
-function processOrnamentItem(item: {
-  quantity: string;
-  purity: string;
-  stone?: string;
-  throde?: string;
-  chain?: string;
-  wastage_mode: "PERCENT" | "GRAM";
-  wastage_value: string;
-}) {
-  const stone = item.stone ?? "0";
-  const throde = item.throde ?? "0";
-
-  // base_weight = quantity - stone - throde
-  const base_weight = toQuantityString(
-    subtractDecimals(toQuantityString(subtractDecimals(item.quantity, stone)), throde),
-  );
-
-  if (item.wastage_mode === "PERCENT" && toDecimal(item.purity).lte(0)) {
-    throw new AppError(
-      "BUSINESS_RULE_VIOLATION",
-      "Purity must be greater than zero when using PERCENT wastage mode"
-    );
-  }
-
-  const wastageQty =
-    item.wastage_mode === "PERCENT"
-      ? calcWastagePercent(base_weight, item.wastage_value, item.purity)
-      : calcWastageGram(base_weight, item.wastage_value);
-
-  // total_weight = calcTotalWeight(quantity, stone, throde, wastageQty)
-  const total_weight = calcTotalWeight(
-    item.quantity,
-    stone,
-    throde,
-    toQuantityString(wastageQty),
-  );
+  const [lastGroup] = await db
+    .select({ rate_per_gram: entryGroups.rate_per_gram })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.account_id, tx.group.account_id),
+        eq(entryGroups.is_deleted, false),
+        not(eq(entryGroups.type, "REVERSAL")),
+        isNotNull(entryGroups.rate_per_gram),
+        sql`created_at < ${new Date(tx.group.created_at).toISOString()}`
+      )
+    )
+    .orderBy(desc(entryGroups.created_at))
+    .limit(1);
 
   return {
-    totalWeightStr: toQuantityString(total_weight),
-    wastageQtyStr: toQuantityString(wastageQty),
+    ...tx,
+    openingPure: opening.balancePure.toString(),
+    openingCash: opening.totalCash.toString(),
+    lastRate: lastGroup?.rate_per_gram || "0"
   };
 }
+
+// ─── createJobWork ────────────────────────────────────────────────────────────
 
 export async function createJobWork(
   input: z.infer<typeof CreateJobWorkSchema>,
   options?: { existingBillNo?: number; existingEntryNo?: number }
 ) {
-  // Validate stock for all issues (Gold is pooled, Ornaments require lots)
-  for (const item of input.gold_issue) {
-    // lot_id is optional in pooled mode for gold
-  }
+  // ── Always validate input regardless of call path (tRPC or direct) ──────────
+  const validated = CreateJobWorkSchema.parse(input);
+  const safeInput = { ...input, ...validated };
 
-  for (const item of input.ornament_issue) {
-    if (!item.lot_id) throw new AppError("VALIDATION_ERROR", "Lot ID is required for ornament issue");
+  // ── Bill cycle is mandatory ──────────────────────────────────────────────────
+  // A job work must always live inside a cycle. If bill_cycle_id is missing the
+  // entry builder falls back to auto-numbering bill_no (MAX+1), producing a phantom
+  // "bill" that maps to no real cycle. Guard here so BOTH the tRPC create path and
+  // the update path (which recreates via this function) are covered.
+  if (!input.bill_cycle_id) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "A bill cycle must be selected before saving a job work.",
+    );
   }
-
+  const [cycle] = await db
+    .select({ bill_no: jobWorkCycles.bill_no, account_id: jobWorkCycles.account_id })
+    .from(jobWorkCycles)
+    .where(eq(jobWorkCycles.id, input.bill_cycle_id))
+    .limit(1);
+  if (!cycle) {
+    throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.");
+  }
+  if (cycle.account_id !== input.account_id) {
+    throw new AppError(
+      "BUSINESS_RULE_VIOLATION",
+      "Selected bill cycle belongs to a different account.",
+    );
+  }
+  const cycleBillNo: number = cycle.bill_no;
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
-  // Gold issue: SHOP → goldsmith
+  // ── 1. Gold Issue: SHOP → Account ──────────────────────────────────────────
   for (const item of input.gold_issue) {
+    // Only check stock if a specific lot was provided
+    if (item.lot_id) {
+      const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
+      const activeLot = lots.find((l) => l.lot_id === item.lot_id);
+      const available = activeLot?.quantity ?? toDecimal("0");
+
+      // Sign convention allows negative stock for account issues: if stock is 0/insufficient we can give gold
+      /*
+      if (available.lt(toDecimal(item.quantity))) {
+        throw new AppError(
+          "BUSINESS_RULE_VIOLATION",
+          `Insufficient stock for gold issue item ${item.item_id} in lot ${item.lot_id}`,
+        );
+      }
+      */
+    }
+
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       toAccountId: input.account_id,
@@ -165,67 +312,165 @@ export async function createJobWork(
     });
   }
 
-  // Ornament issue: SHOP → goldsmith (with wastage calcs)
+  // ── 2. Ornament Issue: SHOP → Account (with wastage) ───────────────────────
   for (const item of input.ornament_issue) {
-    const { totalWeightStr, wastageQtyStr } = processOrnamentItem(item);
+    const { grossWeight } = calcOrnamentEntry(item);
+
+    if (item.lot_id) {
+      const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
+      const activeLot = lots.find((l) => l.lot_id === item.lot_id);
+      const available = activeLot?.quantity ?? toDecimal("0");
+
+      // Sign convention allows negative stock for account issues: if stock is 0/insufficient we can give gold
+      /*
+      if (available.lt(toDecimal(grossWeight))) {
+        throw new AppError(
+          "BUSINESS_RULE_VIOLATION",
+          `Insufficient stock for ornament issue item ${item.item_id} in lot ${item.lot_id}`,
+        );
+      }
+      */
+    }
+
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       toAccountId: input.account_id,
       itemId: item.item_id,
       lotId: item.lot_id,
-      quantity: totalWeightStr,
+      quantity: grossWeight,       // full gross weight (including wastage)
       purity: item.purity,
-      wastageMode: item.wastage_mode,
-      wastageValue: item.wastage_value,
-    });
-    // Wastage entry to LOSS account
-    entries.push({
-      fromAccountId: input.account_id,
-      toAccountId: SYSTEM_ACCOUNTS.LOSS_ID,
-      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID, // Should be gold item — set per call site
-      quantity: wastageQtyStr,
+      wastageMode: "PERCENT",
+      wastageValue: item.wastage_percent,
     });
   }
 
-  // Gold receipt: goldsmith → SHOP
+  // ── 3. Gold Receipt: Account → SHOP ────────────────────────────────────────
   for (const item of input.gold_receipt) {
     entries.push({
       fromAccountId: input.account_id,
       toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       itemId: item.item_id,
+      lotId: item.lot_id, // optional on receipts
       quantity: item.quantity,
       purity: item.purity,
     });
   }
 
-  // Ornament receipt: goldsmith → SHOP (with wastage calcs)
+  // ── 4. Ornament Receipt: Account → SHOP ────────────────────────────────────
+  // KEY DESIGN: The physical ornament weight (item.quantity) is stored as the
+  // ledger quantity — this is what appears in the shop's stock lot.
+  // e.g. a 40g ring → stock shows 40g, NOT 43.556g (40g + 3.556g wastage).
+  //
+  // However, the account's balance must decrease by the FULL gold consumed:
+  //   grossPure = (physicalWeight + wastageGm) × touch%
+  // We pass this as a pureQuantity override so the balance is correct without
+  // inflating the stock lot weight.
+  //
+  // entryBuilder then computes:
+  //   averageTouch = grossPure / physicalWeight × 100  (e.g. 98%)
   for (const item of input.ornament_receipt) {
-    const { totalWeightStr } = processOrnamentItem(item);
+    const { pureQuantity: grossPure } = calcOrnamentEntry(item);
+
     entries.push({
       fromAccountId: input.account_id,
       toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       itemId: item.item_id,
-      quantity: totalWeightStr,
+      lotId: item.lot_id,
+      // Physical weight of the ornament (user entered 40g → stock lot shows 40g)
+      quantity: item.quantity,
       purity: item.purity,
-      wastageMode: item.wastage_mode,
-      wastageValue: item.wastage_value,
+      // Override: total pure gold consumed = (physicalWeight + wastageGm) × touch%
+      // Account's gold balance decreases by this full amount, not just physical × touch%.
+      pureQuantity: grossPure,
     });
+  }
+
+  // ── 5. Bank Paid: SHOP pays Account (cash out from SHOP) ────────────────────
+  if (input.bank_paid && toDecimal(input.bank_paid).gt(0)) {
+    entries.push({
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.bank_paid,
+      remarks: input.bank_paid_details,
+    });
+  }
+
+  // ── 6. Bank Receive: Account pays SHOP (cash in to SHOP) ────────────────────
+  if (input.bank_receive && toDecimal(input.bank_receive).gt(0)) {
+    entries.push({
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.bank_receive,
+      remarks: input.bank_receive_details,
+    });
+  }
+
+  // ── 6.5. Discount ──────────────────────────────────────────────────────────
+  if (input.discount && toDecimal(input.discount).gt(0)) {
+    entries.push({
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.discount,
+      remarks: "Discount",
+    });
+  }
+
+  // ── 6.6. TDS ───────────────────────────────────────────────────────────────
+  if (input.tds && toDecimal(input.tds).gt(0)) {
+    entries.push({
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.tds,
+      remarks: "TDS",
+    });
+  }
+
+  // ── 7. Partial Cash Conversions ─────────────────────────────────────────────
+  // Each conversion records that the account now owes cash instead of pure gold.
+  // The account sends cash_amount worth of their gold debt to SHOP as a MONEY entry.
+  for (const conversion of input.cash_conversions) {
+    if (toDecimal(conversion.cash_amount).gt(0)) {
+      entries.push({
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: conversion.cash_amount,
+        remarks: `Cash conversion: ${conversion.gold_grams}g @ ₹${conversion.rate_per_gram}/g`,
+      });
+    }
+  }
+
+  // Guard: must have at least one entry
+  if (entries.length === 0) {
+    throw new AppError("VALIDATION_ERROR", "Job work must have at least one entry");
   }
 
   const { group, entries: created } = await createEntryGroup({
     type: "JOB_WORK",
     accountId: input.account_id,
     date: input.date,
-    billNo: options?.existingBillNo,
+    billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
     entryNo: options?.existingEntryNo,
+    ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
+    jobWorkCycleId: input.bill_cycle_id,
+    tdsAmount: input.tds,
     entries,
   });
 
   return { group, entries: created };
 }
 
+// ─── updateJobWork ────────────────────────────────────────────────────────────
+
 export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) {
+  // ── Always validate input regardless of call path (tRPC or direct) ──────────
+  UpdateJobWorkSchema.parse(input);
+
   const [originalGroup] = await db
     .select({
       bill_no: entryGroups.bill_no,
@@ -246,6 +491,8 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
     existingEntryNo: originalGroup.entry_no ?? undefined,
   });
 }
+
+// ─── deleteJobWork ──────────────────────────────────────────────────────────
 
 export async function deleteJobWork(input: z.infer<typeof DeleteTxSchema>) {
   throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for job work");

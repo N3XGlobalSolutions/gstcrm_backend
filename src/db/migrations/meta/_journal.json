@@ -78,6 +78,13 @@
       "when": 1783000000000,
       "tag": "0010_items_touch_column",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783503568964,
+      "tag": "0011_job_work_cycles",
+      "breakpoints": true
     }
   ]
 }

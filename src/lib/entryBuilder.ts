@@ -53,6 +53,7 @@ export interface CreateEntryGroupInput {
   entryNo?: number;
   billNo?: number;
   billCycleId?: string;  // FK to labour_bill_cycles.id
+  jobWorkCycleId?: string;  // FK to job_work_cycles.id
   ratePerGram?: string;
   remarks?: string;
   reversalOf?: string;
@@ -99,6 +100,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         account_id: input.accountId,
         bill_no: groupBillNo,
         bill_cycle_id: input.billCycleId ?? null,
+        job_work_cycle_id: input.jobWorkCycleId ?? null,
         rate_per_gram: input.ratePerGram,
         remarks: input.remarks,
         reversal_of: input.reversalOf,

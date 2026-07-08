@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { accounts } from "./accounts";
 import { labourBillCycles } from "./labour-bill-cycles";
+import { jobWorkCycles } from "./job-work-cycles";
 
 // ─── Enum ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ export const entryGroups = pgTable(
     bill_no: integer("bill_no"),
     // For LABOUR_BILL entries: links to the permanent bill cycle this entry belongs to
     bill_cycle_id: uuid("bill_cycle_id").references(() => labourBillCycles.id),
+    // For JOB_WORK entries: links to the permanent job-work bill cycle this entry belongs to
+    job_work_cycle_id: uuid("job_work_cycle_id").references(() => jobWorkCycles.id),
     date: date("date").notNull(),
     type: entryGroupTypeEnum("type").notNull(),
     account_id: uuid("account_id")
