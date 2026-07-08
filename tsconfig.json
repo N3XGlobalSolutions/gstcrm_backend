@@ -28,7 +28,6 @@
     "noPropertyAccessFromIndexSignature": false,
 
     // Path aliases — use @/* for all internal imports
-    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]

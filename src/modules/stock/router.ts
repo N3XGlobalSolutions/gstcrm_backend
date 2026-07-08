@@ -35,9 +35,10 @@ async function getSummary() {
   const zero = toDecimal("0");
 
   // Fetch shop stock, goldsmith stock, and profit/loss in parallel
-  const [shopLots, mcLots, profitLossRows] = await Promise.all([
+  const [shopLots, shopGoldBalances, mcLots, profitLossRows] = await Promise.all([
     getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID),
-    getAllGoldsmithsLotBalances(goldItemIds),
+    getAccountItemBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds),
+    Promise.resolve([] as any[]),
     (async () => {
       const { entries: entriesTable, entryGroups } = await import("@/db/schema");
       const { inArray, sql } = await import("drizzle-orm");
@@ -62,12 +63,10 @@ async function getSummary() {
 
   // 1. Gold Total Pure in shop
   let gold_total_pure = zero;
-  for (const lot of shopLots) {
-    if (goldItemIds.includes(lot.item_id)) {
-      const pq = lot.pure_quantity ?? zero;
-      if (isFinite(Number(pq))) {
-        gold_total_pure = gold_total_pure.plus(pq);
-      }
+  for (const bal of shopGoldBalances) {
+    const pq = bal.pure_quantity ?? zero;
+    if (isFinite(Number(pq))) {
+      gold_total_pure = gold_total_pure.plus(pq);
     }
   }
 
@@ -191,42 +190,7 @@ export async function getOrnamentStock(input: { page: number; limit: number }) {
 }
 
 async function getMcGoldStock() {
-  const goldsmiths = await db
-    .select()
-    .from(accounts)
-    .where(
-      and(
-        or(eq(accounts.type, "GOLDSMITH"), eq(accounts.customer_type, "GOLD_SMITH")),
-        eq(accounts.is_deleted, false)
-      )
-    );
-
-  const goldItems = await db
-    .select()
-    .from(items)
-    .where(and(eq(items.type, "GOLD"), eq(items.is_deleted, false)))
-    .orderBy(items.entry_no);
-
-  const goldItemIds = goldItems.map((item) => item.id);
-  const lots = await getAllGoldsmithsLotBalances(goldItemIds);
-
-  const flatLots = lots.map((lot) => {
-    const g = goldsmiths.find((acc) => acc.id === lot.account_id)!;
-    const item = goldItems.find((i) => i.id === lot.item_id)!;
-    return {
-      goldsmith: g,
-      item,
-      lot_id: lot.lot_id,
-      balance: lot.quantity.toFixed(3),
-      purity: lot.purity?.toFixed(2),
-      average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (lot.purity ? lot.purity.toFixed(2) : undefined),
-      pure_balance: lot.pure_quantity?.toFixed(3),
-      created_at: lot.created_at,
-    };
-  });
-
-  flatLots.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
-  return flatLots;
+  return [] as any[];
 }
 
 // ─── stock.addOpeningStock ────────────────────────────────────────────────────
