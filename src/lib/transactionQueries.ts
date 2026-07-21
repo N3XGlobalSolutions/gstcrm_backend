@@ -95,6 +95,7 @@ export async function getTransactionById(id: string) {
     .select({
       group: entryGroups,
       account_name: accounts.name,
+      account: accounts,
     })
     .from(entryGroups)
     .leftJoin(accounts, eq(entryGroups.account_id, accounts.id))

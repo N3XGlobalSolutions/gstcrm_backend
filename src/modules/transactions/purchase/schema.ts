@@ -27,6 +27,7 @@ const PurchaseItemSchema = z.object({
   item_id: z.string().uuid(),
   quantity: positiveDecimalSchema,
   purity: puritySchema,
+  rate: positiveDecimalSchema.optional(),
 });
 
 export const CreatePurchaseSchema = z.object({

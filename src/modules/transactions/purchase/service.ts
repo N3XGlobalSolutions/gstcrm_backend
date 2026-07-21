@@ -194,6 +194,8 @@ export async function createPurchase(
       itemId: item.item_id,
       quantity: item.quantity,
       purity: item.purity,
+      // Use item-specific rate; fall back to group rate only if none provided
+      rate: item.rate ?? input.rate_per_gram,
     })),
     ...input.ornament_items.map((item) => ({
       fromAccountId: input.account_id,
@@ -201,6 +203,8 @@ export async function createPurchase(
       itemId: item.item_id,
       quantity: item.quantity,
       purity: item.purity,
+      // Use item-specific rate; fall back to group rate only if none provided
+      rate: item.rate ?? input.rate_per_gram,
     })),
     // Money paid to supplier (shop pays out cash)
     ...(toDecimal(input.bank_amount).gt(0)
