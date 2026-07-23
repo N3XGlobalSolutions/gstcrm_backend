@@ -21,14 +21,14 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
 
   const [total_sales, total_purchase, total_stock_sales, total_job_work, total_labour_bill, total_expense] =
     await Promise.all([
-      // Total sales (money received from customers)
+      // Total sales (monetary value in ₹ of items sold)
       db.execute<{ total: string }>(
-        sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
+        sql`SELECT COALESCE(SUM(e.pure_quantity * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS total
             FROM ${entries} e
             JOIN ${entryGroups} g ON e.group_id = g.id
             WHERE g.type = 'SALE' AND g.is_deleted = false
-              AND e.to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
-              AND e.item_id = ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
+              AND e.from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
+              AND e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
       // Total purchase (gold received)

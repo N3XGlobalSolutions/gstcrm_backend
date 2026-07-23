@@ -23,9 +23,16 @@ export interface ResolvedDateRange {
   to: string | null;
 }
 
+function formatDateLocal(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export function resolveDateRange(input: DateRangeInput): ResolvedDateRange {
   const now = new Date();
-  const today = now.toISOString().split("T")[0]!;
+  const today = formatDateLocal(now);
 
   switch (input.range) {
     case "today":
@@ -33,15 +40,15 @@ export function resolveDateRange(input: DateRangeInput): ResolvedDateRange {
     case "week": {
       const from = new Date(now);
       from.setDate(from.getDate() - 7);
-      return { from: from.toISOString().split("T")[0]!, to: today };
+      return { from: formatDateLocal(from), to: today };
     }
     case "month": {
       const from = new Date(now.getFullYear(), now.getMonth(), 1);
-      return { from: from.toISOString().split("T")[0]!, to: today };
+      return { from: formatDateLocal(from), to: today };
     }
     case "year": {
       const from = new Date(now.getFullYear(), 0, 1);
-      return { from: from.toISOString().split("T")[0]!, to: today };
+      return { from: formatDateLocal(from), to: today };
     }
     case "all":
       return { from: null, to: null };
@@ -53,3 +60,4 @@ export function resolveDateRange(input: DateRangeInput): ResolvedDateRange {
       };
   }
 }
+
