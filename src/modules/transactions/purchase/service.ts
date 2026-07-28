@@ -81,10 +81,13 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
 
     // openingPure: prior net pure grams owed (negated — positive = shop owes supplier)
     // openingCash: exact rupee balance owed to supplier
-    //   = goldCashOut (Σ pure × rate per bill) − totalCash (payments already received)
-    //   This correctly reflects each bill's own rate without any re-multiplication.
+    //   = (goldCashOut − goldCashIn) (Σ pure × rate per bill, reversal-netted)
+    //     − totalCash (payments already received)
+    //   This reflects each bill's own rate without any re-multiplication, and netting
+    //   goldCashIn cancels a reversed bill's gold value so edited bills stay correct.
     const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
     const openingCashNum = parseFloat(opening.goldCashOut.toString() || "0")
+      - parseFloat(opening.goldCashIn.toString() || "0")
       - parseFloat(opening.totalCash.toString() || "0");
 
     return {
@@ -340,8 +343,10 @@ export async function updateGSTPurchaseConversion(
       originalGroup.id
     );
     const priorBalancePure = -parseFloat(opening.balancePure.toString() || "0");
-    // openingCash = goldCashOut - payments received = exact rupee balance owed to supplier
+    // openingCash = (goldCashOut − goldCashIn) − payments received = rupee balance owed
+    // to supplier. Netting goldCashIn keeps this correct after a bill is edited/reversed.
     const priorBalanceCash = parseFloat(opening.goldCashOut.toString() || "0")
+      - parseFloat(opening.goldCashIn.toString() || "0")
       - parseFloat(opening.totalCash.toString() || "0");
 
     // Match Sales formula: totalCashPaid = -openingCash + payment

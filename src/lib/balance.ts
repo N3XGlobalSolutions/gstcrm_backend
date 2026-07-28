@@ -85,7 +85,7 @@ export async function getAggregateBalances(
   accountId: string,
   asOfDate?: Date,
   excludeGroupId?: string,
-): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }> {
+): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal; goldCashIn: Decimal; pureNoRate: Decimal }> {
   const dateFilter = asOfDate
     ? sql`AND e.created_at <= ${asOfDate.toISOString()}`
     : sql``;
@@ -104,6 +104,8 @@ export async function getAggregateBalances(
     payment_pure: string | null;
     cash_no_rate: string | null;
     gold_cash_out: string | null;
+    gold_cash_in: string | null;
+    pure_no_rate: string | null;
   }>(sql`
     SELECT
       SUM(CASE WHEN e.to_account_id = ${accountId} THEN e.pure_quantity ELSE 0 END)::text AS pure_inflow,
@@ -133,15 +135,44 @@ export async function getAggregateBalances(
       END)::text AS cash_no_rate,
 
       -- Sum of (pure × rate) for all gold entries FROM this account (gold sold/sent by account).
-      -- For a purchase supplier: goldCashOut − totalCash = cash still owed by the shop.
+      -- For a purchase supplier: (goldCashOut − goldCashIn) − totalCash = cash still owed by the shop.
+      -- Uses the per-ENTRY rate (e.rate) so a bill with different rates per item reconciles to
+      -- the exact per-row cash the bill was paid against. Falling back to the group rate collapses
+      -- custom rates into a rounded average, which re-multiplied leaves a few-paise phantom.
       SUM(CASE
         WHEN e.from_account_id = ${accountId}
           AND e.item_id != ${cashItemId}
-          AND g.rate_per_gram IS NOT NULL
-          AND g.rate_per_gram::numeric > 0
-        THEN e.pure_quantity * g.rate_per_gram::numeric
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) IS NOT NULL
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) > 0
+        THEN e.pure_quantity * COALESCE(e.rate, g.rate_per_gram::numeric)
         ELSE 0
-      END)::text AS gold_cash_out
+      END)::text AS gold_cash_out,
+
+      -- Mirror of gold_cash_out for gold entries TO this account (gold received by account).
+      -- Reversals swap from/to, so subtracting goldCashIn cancels a reversed bill's gold
+      -- value — keeping the cash-owed figure correct after a bill is edited/reversed.
+      SUM(CASE
+        WHEN e.to_account_id = ${accountId}
+          AND e.item_id != ${cashItemId}
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) IS NOT NULL
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) > 0
+        THEN e.pure_quantity * COALESCE(e.rate, g.rate_per_gram::numeric)
+        ELSE 0
+      END)::text AS gold_cash_in,
+
+      -- Net pure grams from RATE-LESS entries (opening pure balances have no rate).
+      -- These carry forward as grams directly — they have no cash equivalent and must
+      -- never be folded into the cash-first balance (which is rated-gold + cash only).
+      SUM(CASE
+        WHEN COALESCE(e.rate, g.rate_per_gram::numeric) IS NULL
+          OR COALESCE(e.rate, g.rate_per_gram::numeric) = 0 THEN
+          CASE
+            WHEN e.to_account_id = ${accountId} THEN e.pure_quantity
+            WHEN e.from_account_id = ${accountId} THEN -e.pure_quantity
+            ELSE 0
+          END
+        ELSE 0
+      END)::text AS pure_no_rate
     FROM entries e
     LEFT JOIN entry_groups g ON e.group_id = g.id
     WHERE (e.to_account_id = ${accountId} OR e.from_account_id = ${accountId})
@@ -155,6 +186,8 @@ export async function getAggregateBalances(
   const cashOutflow = row?.cash_outflow ?? "0";
   const paymentPure = toDecimal(row?.payment_pure ?? "0");
   const goldCashOut = toDecimal(row?.gold_cash_out ?? "0");
+  const goldCashIn = toDecimal(row?.gold_cash_in ?? "0");
+  const pureNoRate = toDecimal(row?.pure_no_rate ?? "0");
 
   const pureBalance = subtractDecimals(pureInflow, pureOutflow);
   const cashBalance = subtractDecimals(cashInflow, cashOutflow);
@@ -165,12 +198,14 @@ export async function getAggregateBalances(
     totalCash: cashBalance,
     balancePure: balancePureBeforeCash,
     goldCashOut,
+    goldCashIn,
+    pureNoRate,
   };
 }
 
 export async function getBatchAggregateBalances(
   tuples: { id: string; accountId: string; createdAt: Date; excludeGroupId: string }[]
-): Promise<Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }>> {
+): Promise<Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal; goldCashIn: Decimal }>> {
   if (tuples.length === 0) return {};
 
   const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
@@ -206,17 +241,30 @@ export async function getBatchAggregateBalances(
         ELSE 0
       END)::text AS payment_pure,
       -- Σ(pure × rate) for gold entries FROM account: total cash value of gold sold by this account.
-      -- goldCashOut − cashInflow = cash still owed to the supplier by the shop.
+      -- goldCashOut − cashInflow = cash still owed to the supplier by the shop. Uses the per-ENTRY
+      -- rate so per-item custom rates reconcile exactly (see single-query note above).
       SUM(CASE
         WHEN e.from_account_id = p.account_id
           AND e.item_id != ${cashItemId}
           AND e.created_at <= p.created_at
           AND e.group_id != p.exclude_group_id
-          AND g.rate_per_gram IS NOT NULL
-          AND g.rate_per_gram::numeric > 0
-        THEN e.pure_quantity * g.rate_per_gram::numeric
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) IS NOT NULL
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) > 0
+        THEN e.pure_quantity * COALESCE(e.rate, g.rate_per_gram::numeric)
         ELSE 0
-      END)::text AS gold_cash_out
+      END)::text AS gold_cash_out,
+      -- Mirror for gold entries TO account. Subtracting goldCashIn cancels a reversed
+      -- bill's gold value (reversal swaps from/to), keeping edited-bill openings correct.
+      SUM(CASE
+        WHEN e.to_account_id = p.account_id
+          AND e.item_id != ${cashItemId}
+          AND e.created_at <= p.created_at
+          AND e.group_id != p.exclude_group_id
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) IS NOT NULL
+          AND COALESCE(e.rate, g.rate_per_gram::numeric) > 0
+        THEN e.pure_quantity * COALESCE(e.rate, g.rate_per_gram::numeric)
+        ELSE 0
+      END)::text AS gold_cash_in
     FROM params p
     LEFT JOIN entries e ON (e.to_account_id = p.account_id OR e.from_account_id = p.account_id)
     LEFT JOIN entry_groups g ON e.group_id = g.id
@@ -231,9 +279,10 @@ export async function getBatchAggregateBalances(
     cash_outflow: string | null;
     payment_pure: string | null;
     gold_cash_out: string | null;
+    gold_cash_in: string | null;
   }>(query);
 
-  const results: Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }> = {};
+  const results: Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal; goldCashIn: Decimal }> = {};
 
   for (const row of rows) {
     const pureInflow = row.pure_inflow ?? "0";
@@ -242,6 +291,7 @@ export async function getBatchAggregateBalances(
     const cashOutflow = row.cash_outflow ?? "0";
     const paymentPure = toDecimal(row.payment_pure ?? "0");
     const goldCashOut = toDecimal(row.gold_cash_out ?? "0");
+    const goldCashIn = toDecimal(row.gold_cash_in ?? "0");
 
     const pureBalance = subtractDecimals(pureInflow, pureOutflow);
     const cashBalance = subtractDecimals(cashInflow, cashOutflow);
@@ -252,6 +302,7 @@ export async function getBatchAggregateBalances(
       totalCash: cashBalance,
       balancePure: balancePureBeforeCash,
       goldCashOut,
+      goldCashIn,
     };
   }
 
@@ -263,6 +314,7 @@ export async function getBatchAggregateBalances(
         totalCash: toDecimal("0"),
         balancePure: toDecimal("0"),
         goldCashOut: toDecimal("0"),
+        goldCashIn: toDecimal("0"),
       };
     }
   }

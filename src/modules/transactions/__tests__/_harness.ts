@@ -94,7 +94,14 @@ export async function seedShopOrnamentLot(itemId: string, grams: string, purity:
 
 // ─── Balance readers ──────────────────────────────────────────────────────────
 
-export interface Bal { totalPure: number; totalCash: number; balancePure: number; }
+export interface Bal {
+  totalPure: number;
+  totalCash: number;
+  balancePure: number;
+  goldCashOut: number;
+  goldCashIn: number;
+  pureNoRate: number;
+}
 
 export async function bal(accountId: string): Promise<Bal> {
   const b = await getAggregateBalances(accountId);
@@ -102,7 +109,22 @@ export async function bal(accountId: string): Promise<Bal> {
     totalPure: parseFloat(b.totalPure.toString()),
     totalCash: parseFloat(b.totalCash.toString()),
     balancePure: parseFloat(b.balancePure.toString()),
+    goldCashOut: parseFloat(b.goldCashOut.toString()),
+    goldCashIn: parseFloat(b.goldCashIn.toString()),
+    pureNoRate: parseFloat(b.pureNoRate.toString()),
   };
+}
+
+/**
+ * Cash-first "shop owes supplier" grams — exactly what the Purchase form now shows
+ * as Opening Pure: the rupee balance owed ((goldCashOut − goldCashIn) − totalCash)
+ * converted to grams at `lastRate`, minus rate-less opening-pure grams.
+ * Rate-stable, reversal-safe, and phantom-free.
+ */
+export function cashFirstPayable(b: Bal, lastRate: number): number {
+  const cashOwed = b.goldCashOut - b.goldCashIn - b.totalCash;
+  const ratedPure = lastRate > 0 ? cashOwed / lastRate : 0;
+  return round3(ratedPure - b.pureNoRate);
 }
 
 /** Net gram balance of one item for an account (e.g. SHOP stock of an item). */

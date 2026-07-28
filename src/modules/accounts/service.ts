@@ -257,12 +257,17 @@ export async function getAccountAggregateBalances(
     .orderBy(desc(entryGroups.created_at))
     .limit(1);
 
-  // goldCashBalance = goldCashOut - totalCash
-  //   goldCashOut  = Σ(pure × rate) for all gold the account has SOLD (sent out)
+  // goldCashBalance = (goldCashOut - goldCashIn) - totalCash
+  //   goldCashOut  = Σ(pure × rate) for all gold the account has SENT (sold to shop)
+  //   goldCashIn   = Σ(pure × rate) for all gold the account has RECEIVED
   //   totalCash    = net cash payments received by the account
   // For purchase suppliers this is the exact cash the shop still owes them:
   //   every prior bill's gold value at its own rate, minus every payment received.
-  const goldCashBalance = balances.goldCashOut.minus(balances.totalCash);
+  //   Netting goldCashIn cancels a reversed bill's gold value (reversal swaps from/to),
+  //   so an edited bill never leaves a stale amount in the opening balance.
+  const goldCashBalance = balances.goldCashOut
+    .minus(balances.goldCashIn)
+    .minus(balances.totalCash);
 
   return {
     totalPure: balances.totalPure.toFixed(3),
@@ -272,6 +277,9 @@ export async function getAccountAggregateBalances(
     lastRate: lastGroup?.rate_per_gram ?? null,
     // Exact cash balance owed to supplier: sum of (pure × rate) per bill minus payments.
     goldCashBalance: goldCashBalance.toFixed(2),
+    // Net grams from rate-less opening-pure entries — carried forward as grams as-is,
+    // since they have no cash side and must not be routed through the cash-first balance.
+    pureNoRate: balances.pureNoRate.toFixed(3),
   };
 }
 

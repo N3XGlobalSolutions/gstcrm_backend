@@ -10,8 +10,10 @@
  */
 import { describe, it, expect } from "bun:test";
 import { createPurchase, updatePurchase } from "@/modules/transactions/purchase/service";
+import { createEntryGroup } from "@/lib/entryBuilder";
+import { SYSTEM_ITEMS } from "@/config/constants";
 import {
-  makeSupplier, makeGoldItem, makeOrnamentItem, bal, itemGrams, purePure, close,
+  makeSupplier, makeGoldItem, makeOrnamentItem, bal, cashFirstPayable, itemGrams, purePure, close,
   SHOP, TODAY,
 } from "./_harness";
 
@@ -122,5 +124,85 @@ describe("PURCHASE full-cycle", () => {
     await updatePurchase({ ...base({ account_id: s, gold_items: [line(g, "15", "92")] }), id: (r as any).group.id } as any);
     close(await payable(s), purePure(15, 92), 0.001, "P13 post-edit 13.8");
     close(await itemGrams(SHOP, g), 15, 0.001, "P13 stock reflects edit");
+  });
+
+  // ── P14: cross-bill settlement at a DIFFERENT rate — the loki phantom ──────────
+  // A prior bill's gold is billed at one rate, then a later bill pays off the whole
+  // running cash balance at a different rate. The per-bill balancePure formula divides
+  // that payment by the later bill's rate and under-credits the earlier gold, leaving a
+  // phantom gram balance even though the supplier is fully paid in cash. The Purchase
+  // form's cash-first opening pure (goldCashBalance ÷ lastRate) must read 0.
+  it("P14 — cross-rate settlement leaves no phantom (cash-first opening = 0)", async () => {
+    const s = await makeSupplier(); const g = await makeGoldItem();
+    // bill1 @1000, unpaid: 10g pure owed = ₹10,000
+    await createPurchase(base({ account_id: s, gold_items: [line(g, "10", "100")], rate_per_gram: "1000" }) as any);
+    // bill2 @10000: buy 5g pure (₹50,000) and pay off EVERYTHING (₹10,000 + ₹50,000)
+    await createPurchase(base({ account_id: s, gold_items: [line(g, "5", "100")], rate_per_gram: "10000", bank_amount: "60000" }) as any);
+
+    const b = await bal(s);
+    // The old per-bill formula still shows a phantom — this documents the bug the fix avoids:
+    close(-b.balancePure, 9, 0.001, "P14 per-bill balancePure shows 9g phantom");
+    // Cash is fully settled: ₹0 owed.
+    close(b.goldCashOut - b.totalCash, 0, 0.01, "P14 cash fully settled (₹0 owed)");
+    // Cash-first opening pure (what the Purchase form now displays) = 0, no phantom.
+    close(cashFirstPayable(b, 10000), 0, 0.001, "P14 cash-first opening pure = 0");
+  });
+
+  // ── P15: a rate-less opening-pure balance must survive the cash-first switch ───
+  it("P15 — rate-less opening pure carries forward as grams (no regression)", async () => {
+    const s = await makeSupplier();
+    // 50g opening pure, no rate — exactly how account creation records an opening balance.
+    await createEntryGroup({
+      type: "OPENING", accountId: s, date: TODAY,
+      entries: [{ fromAccountId: SHOP, toAccountId: s, itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID, quantity: "0", pureQuantity: "50" }],
+    });
+    const b = await bal(s);
+    close(b.pureNoRate, 50, 0.001, "P15 pureNoRate captures rate-less opening pure");
+    // No rated bill (lastRate = 0) and no cash movement → opening pure stays −50,
+    // matching the prior −balancePure behaviour for opening balances.
+    close(cashFirstPayable(b, 0), -50, 0.001, "P15 opening pure preserved (−50)");
+  });
+
+  // ── P16: editing a bill must not double-count via the reversal ────────────────
+  // updatePurchase reverses the original (swapping from/to, same rate) then recreates.
+  // The single-direction goldCashOut would otherwise count both the reversed original
+  // AND the new bill; subtracting goldCashIn cancels the reversal so only the edit stands.
+  it("P16 — cash-first opening is reversal-safe after an edit", async () => {
+    const s = await makeSupplier(); const g = await makeGoldItem();
+    const r = await createPurchase(base({ account_id: s, gold_items: [line(g, "10", "100")], rate_per_gram: "6000" }) as any);
+    await updatePurchase({ ...base({ account_id: s, gold_items: [line(g, "15", "100")], rate_per_gram: "6000" }), id: (r as any).group.id } as any);
+
+    const b = await bal(s);
+    // The reversal really did record a gold-IN of the original 10g — the double-count source.
+    close(b.goldCashIn, 10 * 6000, 1, "P16 reversal recorded 10g gold-in");
+    // Net cash owed reflects only the edited 15g (not 25g), and cash-first opening = 15g.
+    close(b.goldCashOut - b.goldCashIn - b.totalCash, 15 * 6000, 1, "P16 cash owed = 15g×6000");
+    close(cashFirstPayable(b, 6000), 15, 0.001, "P16 cash-first opening = 15g (reversal-safe)");
+  });
+
+  // ── P17: per-item custom rates must reconcile to the EXACT per-row cash ────────
+  // A bill with different rates per item stores a single group rate = the rounded
+  // weighted average. Rebuilding cash as (total pure × avg rate) leaves a few-paise
+  // phantom (loki's ₹0.06). goldCashOut must use each entry's own rate instead.
+  it("P17 — per-item custom rates reconcile to exact cash (no avg-rate phantom)", async () => {
+    const s = await makeSupplier(); const g1 = await makeGoldItem(); const g2 = await makeGoldItem();
+    const trueCash = 9 * 5241 + 10 * 5212; // 99289 exactly (per-row); avg 99289/19 = 5225.7368…→5225.74
+    await createPurchase({
+      date: TODAY,
+      rate_per_gram: "5225.74", // rounded weighted-average, exactly as the form stores it
+      gold_items: [
+        { item_id: g1, quantity: "9", purity: "100", rate: "5241" },
+        { item_id: g2, quantity: "10", purity: "100", rate: "5212" },
+      ],
+      ornament_items: [],
+      bank_amount: String(trueCash),
+    } as any);
+
+    const b = await bal(s);
+    // goldCashOut is built from per-row rates → the exact ₹99,289, not ₹99,289.06.
+    close(b.goldCashOut, trueCash, 0.001, "P17 goldCashOut = Σ(pure×rowRate), not pure×avgRate");
+    // Fully paid ⇒ zero cash balance and zero cash-first opening — no lingering paise.
+    close(b.goldCashOut - b.goldCashIn - b.totalCash, 0, 0.001, "P17 cash settled (no phantom)");
+    close(cashFirstPayable(b, 5225.74), 0, 0.001, "P17 cash-first opening = 0");
   });
 });
