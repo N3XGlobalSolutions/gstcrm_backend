@@ -85,7 +85,7 @@ export async function getAggregateBalances(
   accountId: string,
   asOfDate?: Date,
   excludeGroupId?: string,
-): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }> {
+): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }> {
   const dateFilter = asOfDate
     ? sql`AND e.created_at <= ${asOfDate.toISOString()}`
     : sql``;
@@ -103,6 +103,7 @@ export async function getAggregateBalances(
     cash_outflow: string | null;
     payment_pure: string | null;
     cash_no_rate: string | null;
+    gold_cash_out: string | null;
   }>(sql`
     SELECT
       SUM(CASE WHEN e.to_account_id = ${accountId} THEN e.pure_quantity ELSE 0 END)::text AS pure_inflow,
@@ -129,7 +130,18 @@ export async function getAggregateBalances(
             ELSE 0
           END
         ELSE 0
-      END)::text AS cash_no_rate
+      END)::text AS cash_no_rate,
+
+      -- Sum of (pure × rate) for all gold entries FROM this account (gold sold/sent by account).
+      -- For a purchase supplier: goldCashOut − totalCash = cash still owed by the shop.
+      SUM(CASE
+        WHEN e.from_account_id = ${accountId}
+          AND e.item_id != ${cashItemId}
+          AND g.rate_per_gram IS NOT NULL
+          AND g.rate_per_gram::numeric > 0
+        THEN e.pure_quantity * g.rate_per_gram::numeric
+        ELSE 0
+      END)::text AS gold_cash_out
     FROM entries e
     LEFT JOIN entry_groups g ON e.group_id = g.id
     WHERE (e.to_account_id = ${accountId} OR e.from_account_id = ${accountId})
@@ -142,6 +154,7 @@ export async function getAggregateBalances(
   const cashInflow = row?.cash_inflow ?? "0";
   const cashOutflow = row?.cash_outflow ?? "0";
   const paymentPure = toDecimal(row?.payment_pure ?? "0");
+  const goldCashOut = toDecimal(row?.gold_cash_out ?? "0");
 
   const pureBalance = subtractDecimals(pureInflow, pureOutflow);
   const cashBalance = subtractDecimals(cashInflow, cashOutflow);
@@ -151,12 +164,13 @@ export async function getAggregateBalances(
     totalPure: pureBalance,
     totalCash: cashBalance,
     balancePure: balancePureBeforeCash,
+    goldCashOut,
   };
 }
 
 export async function getBatchAggregateBalances(
   tuples: { id: string; accountId: string; createdAt: Date; excludeGroupId: string }[]
-): Promise<Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }>> {
+): Promise<Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }>> {
   if (tuples.length === 0) return {};
 
   const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
@@ -190,7 +204,19 @@ export async function getBatchAggregateBalances(
             ELSE 0
           END
         ELSE 0
-      END)::text AS payment_pure
+      END)::text AS payment_pure,
+      -- Σ(pure × rate) for gold entries FROM account: total cash value of gold sold by this account.
+      -- goldCashOut − cashInflow = cash still owed to the supplier by the shop.
+      SUM(CASE
+        WHEN e.from_account_id = p.account_id
+          AND e.item_id != ${cashItemId}
+          AND e.created_at <= p.created_at
+          AND e.group_id != p.exclude_group_id
+          AND g.rate_per_gram IS NOT NULL
+          AND g.rate_per_gram::numeric > 0
+        THEN e.pure_quantity * g.rate_per_gram::numeric
+        ELSE 0
+      END)::text AS gold_cash_out
     FROM params p
     LEFT JOIN entries e ON (e.to_account_id = p.account_id OR e.from_account_id = p.account_id)
     LEFT JOIN entry_groups g ON e.group_id = g.id
@@ -204,9 +230,10 @@ export async function getBatchAggregateBalances(
     cash_inflow: string | null;
     cash_outflow: string | null;
     payment_pure: string | null;
+    gold_cash_out: string | null;
   }>(query);
 
-  const results: Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal }> = {};
+  const results: Record<string, { totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal }> = {};
 
   for (const row of rows) {
     const pureInflow = row.pure_inflow ?? "0";
@@ -214,6 +241,7 @@ export async function getBatchAggregateBalances(
     const cashInflow = row.cash_inflow ?? "0";
     const cashOutflow = row.cash_outflow ?? "0";
     const paymentPure = toDecimal(row.payment_pure ?? "0");
+    const goldCashOut = toDecimal(row.gold_cash_out ?? "0");
 
     const pureBalance = subtractDecimals(pureInflow, pureOutflow);
     const cashBalance = subtractDecimals(cashInflow, cashOutflow);
@@ -223,6 +251,7 @@ export async function getBatchAggregateBalances(
       totalPure: pureBalance,
       totalCash: cashBalance,
       balancePure: balancePureBeforeCash,
+      goldCashOut,
     };
   }
 
@@ -233,6 +262,7 @@ export async function getBatchAggregateBalances(
         totalPure: toDecimal("0"),
         totalCash: toDecimal("0"),
         balancePure: toDecimal("0"),
+        goldCashOut: toDecimal("0"),
       };
     }
   }

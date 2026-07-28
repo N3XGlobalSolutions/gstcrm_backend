@@ -79,10 +79,18 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
   const finalEnrichedData = enrichedData.map((d) => {
     const opening = batchBalances[d.group.id]!;
 
+    // openingPure: prior net pure grams owed (negated — positive = shop owes supplier)
+    // openingCash: exact rupee balance owed to supplier
+    //   = goldCashOut (Σ pure × rate per bill) − totalCash (payments already received)
+    //   This correctly reflects each bill's own rate without any re-multiplication.
+    const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
+    const openingCashNum = parseFloat(opening.goldCashOut.toString() || "0")
+      - parseFloat(opening.totalCash.toString() || "0");
+
     return {
       ...d,
-      openingPure: (-parseFloat(opening.balancePure.toString() || "0")).toFixed(4),
-      openingCash: ((-parseFloat(opening.balancePure.toString() || "0")) * (d.group.rate_per_gram ? parseFloat(d.group.rate_per_gram) : 0)).toFixed(2),
+      openingPure: openingPureNum.toFixed(4),
+      openingCash: openingCashNum.toFixed(2),
       isConverted: d.isConverted,
       canUndoConversion: d.canUndoConversion,
       convertedAt: d.convertedAt,
@@ -332,8 +340,13 @@ export async function updateGSTPurchaseConversion(
       originalGroup.id
     );
     const priorBalancePure = -parseFloat(opening.balancePure.toString() || "0");
-    
-    const balancePure = priorBalancePure + currentPure - (rate > 0 ? bankPaidAmount / rate : 0);
+    // openingCash = goldCashOut - payments received = exact rupee balance owed to supplier
+    const priorBalanceCash = parseFloat(opening.goldCashOut.toString() || "0")
+      - parseFloat(opening.totalCash.toString() || "0");
+
+    // Match Sales formula: totalCashPaid = -openingCash + payment
+    const totalCashPaid = -priorBalanceCash + bankPaidAmount;
+    const balancePure = priorBalancePure + currentPure - (rate > 0 ? totalCashPaid / rate : 0);
     const balanceCash = balancePure * rate;
 
     // 3. Create the flat copy in the gst_purchase_history table

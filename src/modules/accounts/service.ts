@@ -257,12 +257,21 @@ export async function getAccountAggregateBalances(
     .orderBy(desc(entryGroups.created_at))
     .limit(1);
 
+  // goldCashBalance = goldCashOut - totalCash
+  //   goldCashOut  = Σ(pure × rate) for all gold the account has SOLD (sent out)
+  //   totalCash    = net cash payments received by the account
+  // For purchase suppliers this is the exact cash the shop still owes them:
+  //   every prior bill's gold value at its own rate, minus every payment received.
+  const goldCashBalance = balances.goldCashOut.minus(balances.totalCash);
+
   return {
     totalPure: balances.totalPure.toFixed(3),
     totalCash: balances.totalCash.toFixed(2),
     // Rate-stable opening balance in pure grams. 3dp = system standard for gold.
     balancePure: balances.balancePure.toFixed(3),
     lastRate: lastGroup?.rate_per_gram ?? null,
+    // Exact cash balance owed to supplier: sum of (pure × rate) per bill minus payments.
+    goldCashBalance: goldCashBalance.toFixed(2),
   };
 }
 
