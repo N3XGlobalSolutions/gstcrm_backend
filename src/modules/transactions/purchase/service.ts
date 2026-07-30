@@ -165,13 +165,21 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   const ornamentEntries = tx.entries.filter((e) => e.item_type === "ORNAMENT");
   const moneyEntries = tx.entries.filter((e) => e.item_type === "MONEY");
 
+  // openingCash = exact rupee balance still owed to supplier before this bill:
+  //   goldCashOut = Σ(pure × rate) for all gold supplier sent to shop
+  //   goldCashIn  = Σ(pure × rate) for gold received back (reversals)
+  //   totalCash   = net cash payments already made to supplier
+  const openingCashBalance = opening.goldCashOut
+    .minus(opening.goldCashIn)
+    .minus(opening.totalCash);
+
   return {
     ...tx,
     goldEntries,
     ornamentEntries,
     moneyEntries,
     openingPure: opening.balancePure.toString(),
-    openingCash: opening.totalCash.toString(),
+    openingCash: openingCashBalance.toFixed(2),
     lastRate: lastGroup?.rate_per_gram || "0",
     matchingSale: saleGroup ? {
       group: saleGroup,
