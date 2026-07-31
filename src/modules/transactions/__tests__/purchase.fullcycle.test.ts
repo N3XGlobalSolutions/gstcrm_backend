@@ -188,6 +188,7 @@ describe("PURCHASE full-cycle", () => {
     const s = await makeSupplier(); const g1 = await makeGoldItem(); const g2 = await makeGoldItem();
     const trueCash = 9 * 5241 + 10 * 5212; // 99289 exactly (per-row); avg 99289/19 = 5225.7368…→5225.74
     await createPurchase({
+      account_id: s,
       date: TODAY,
       rate_per_gram: "5225.74", // rounded weighted-average, exactly as the form stores it
       gold_items: [

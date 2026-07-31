@@ -17,6 +17,13 @@ export async function generateBillNo(
   accountId: string,
   type: string,
 ): Promise<number> {
+  // Fail loudly on a missing accountId. Interpolating an empty bind value into the
+  // lock below produces `WHERE id =  FOR UPDATE`, whose raw Postgres syntax error
+  // buries the real cause (a caller that skipped validation).
+  if (!accountId) {
+    throw new Error("generateBillNo: accountId is required");
+  }
+
   // Lock the account row to serialize bill generation for this account
   await tx.execute(
     sql`SELECT id FROM ${accounts} WHERE id = ${accountId} FOR UPDATE`

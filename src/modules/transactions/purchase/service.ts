@@ -165,6 +165,13 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   const ornamentEntries = tx.entries.filter((e) => e.item_type === "ORNAMENT");
   const moneyEntries = tx.entries.filter((e) => e.item_type === "MONEY");
 
+  // A discount is written by createPurchase as a MONEY entry with remarks 'Discount',
+  // structurally identical to a bank payment (both SHOP → supplier). Split them so the
+  // edit form can rehydrate each field independently — without this the form cannot see
+  // the discount, sends back "0", and the reverse-and-recreate update silently erases it.
+  const discountEntries = moneyEntries.filter((e) => e.entry.remarks === "Discount");
+  const paymentEntries = moneyEntries.filter((e) => e.entry.remarks !== "Discount");
+
   // openingCash = exact rupee balance still owed to supplier before this bill:
   //   goldCashOut = Σ(pure × rate) for all gold supplier sent to shop
   //   goldCashIn  = Σ(pure × rate) for gold received back (reversals)
@@ -178,6 +185,8 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
     goldEntries,
     ornamentEntries,
     moneyEntries,
+    paymentEntries,
+    discountEntries,
     openingPure: opening.balancePure.toString(),
     openingCash: openingCashBalance.toFixed(2),
     lastRate: lastGroup?.rate_per_gram || "0",
