@@ -86,9 +86,8 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     //   This reflects each bill's own rate without any re-multiplication, and netting
     //   goldCashIn cancels a reversed bill's gold value so edited bills stay correct.
     const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
-    const openingCashNum = parseFloat(opening.goldCashOut.toString() || "0")
-      - parseFloat(opening.goldCashIn.toString() || "0")
-      - parseFloat(opening.totalCash.toString() || "0");
+    const rateNum = parseFloat(d.group.rate_per_gram || "0");
+    const openingCashNum = rateNum > 0 ? openingPureNum * rateNum : 0;
 
     return {
       ...d,
@@ -172,13 +171,10 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   const discountEntries = moneyEntries.filter((e) => e.entry.remarks === "Discount");
   const paymentEntries = moneyEntries.filter((e) => e.entry.remarks !== "Discount");
 
-  // openingCash = exact rupee balance still owed to supplier before this bill:
-  //   goldCashOut = Σ(pure × rate) for all gold supplier sent to shop
-  //   goldCashIn  = Σ(pure × rate) for gold received back (reversals)
-  //   totalCash   = net cash payments already made to supplier
-  const openingCashBalance = opening.goldCashOut
-    .minus(opening.goldCashIn)
-    .minus(opening.totalCash);
+  // Opening Cash is ALWAYS Opening Pure × Rate (consistent everywhere)
+  const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
+  const rateNum = parseFloat(tx.group.rate_per_gram || lastGroup?.rate_per_gram || "0");
+  const openingCashBalance = toDecimal(openingPureNum * rateNum);
 
   return {
     ...tx,

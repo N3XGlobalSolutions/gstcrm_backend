@@ -265,9 +265,10 @@ export async function getAccountAggregateBalances(
   //   every prior bill's gold value at its own rate, minus every payment received.
   //   Netting goldCashIn cancels a reversed bill's gold value (reversal swaps from/to),
   //   so an edited bill never leaves a stale amount in the opening balance.
-  const goldCashBalance = balances.goldCashOut
-    .minus(balances.goldCashIn)
-    .minus(balances.totalCash);
+  const lastRateVal = toDecimal(lastGroup?.rate_per_gram ?? "0");
+  const goldCashBalance = lastRateVal.gt(0)
+    ? balances.balancePure.mul(lastRateVal).abs()
+    : balances.goldCashOut.minus(balances.goldCashIn).minus(balances.totalCash).abs();
 
   return {
     totalPure: balances.totalPure.toFixed(3),
@@ -275,7 +276,7 @@ export async function getAccountAggregateBalances(
     // Rate-stable opening balance in pure grams. 3dp = system standard for gold.
     balancePure: balances.balancePure.toFixed(3),
     lastRate: lastGroup?.rate_per_gram ?? null,
-    // Exact cash balance owed to supplier: sum of (pure × rate) per bill minus payments.
+    // Opening Cash is ALWAYS Opening Pure × Rate (consistent everywhere)
     goldCashBalance: goldCashBalance.toFixed(2),
     // Net grams from rate-less opening-pure entries — carried forward as grams as-is,
     // since they have no cash side and must not be routed through the cash-first balance.
