@@ -17,9 +17,17 @@ import { env } from "@/config/env";
 
 const authRouter = Router();
 
+const ACCESS_COOKIE = "access_token";
 const REFRESH_COOKIE = "refresh_token";
 
-const cookieOptions = {
+const accessCookieOptions = {
+  httpOnly: true,
+  secure: env.IS_PROD,
+  sameSite: "lax" as const,
+  path: "/",
+};
+
+const refreshCookieOptions = {
   httpOnly: true,
   secure: env.IS_PROD,
   sameSite: "lax" as const,
@@ -89,13 +97,16 @@ authRouter.post("/login", loginRateLimiter, async (req, res): Promise<void> => {
       expires_at: expiresAt,
     });
 
-    const cookieOpts: Record<string, any> = { ...cookieOptions };
+    const refreshCookieOpts: Record<string, any> = { ...refreshCookieOptions };
+    const accessCookieOpts: Record<string, any> = { ...accessCookieOptions };
     if (rememberMe) {
-      cookieOpts.expires = expiresAt;
+      refreshCookieOpts.expires = expiresAt;
+      accessCookieOpts.expires = expiresAt;
     }
 
     res
-      .cookie(REFRESH_COOKIE, rawRefresh, cookieOpts)
+      .cookie(ACCESS_COOKIE, accessToken, accessCookieOpts)
+      .cookie(REFRESH_COOKIE, rawRefresh, refreshCookieOpts)
       .json({
         token: accessToken,
         user: { id: user.id, username: user.username, user_group: user.user_group },
@@ -113,7 +124,7 @@ authRouter.post("/login", loginRateLimiter, async (req, res): Promise<void> => {
 authRouter.post("/refresh", async (req, res): Promise<void> => {
   const rawRefresh: string | undefined = (req as Request & { cookies: Record<string, string> }).cookies[REFRESH_COOKIE];
   if (!rawRefresh) {
-    res.status(401).json({ message: "No refresh token" });
+    res.clearCookie(ACCESS_COOKIE, accessCookieOptions).status(401).json({ message: "No refresh token" });
     return;
   }
 
@@ -126,7 +137,11 @@ authRouter.post("/refresh", async (req, res): Promise<void> => {
       .limit(1);
 
     if (!stored || stored.expires_at < new Date()) {
-      res.clearCookie(REFRESH_COOKIE, cookieOptions).status(401).json({ message: "Invalid or expired refresh token" });
+      res
+        .clearCookie(ACCESS_COOKIE, accessCookieOptions)
+        .clearCookie(REFRESH_COOKIE, refreshCookieOptions)
+        .status(401)
+        .json({ message: "Invalid or expired refresh token" });
       return;
     }
 
@@ -140,7 +155,11 @@ authRouter.post("/refresh", async (req, res): Promise<void> => {
       .limit(1);
 
     if (!user) {
-      res.clearCookie(REFRESH_COOKIE, cookieOptions).status(401).json({ message: "User not found" });
+      res
+        .clearCookie(ACCESS_COOKIE, accessCookieOptions)
+        .clearCookie(REFRESH_COOKIE, refreshCookieOptions)
+        .status(401)
+        .json({ message: "User not found" });
       return;
     }
 
@@ -171,13 +190,16 @@ authRouter.post("/refresh", async (req, res): Promise<void> => {
       user_group: user.user_group ?? "",
     });
 
-    const cookieOpts: Record<string, any> = { ...cookieOptions };
+    const refreshCookieOpts: Record<string, any> = { ...refreshCookieOptions };
+    const accessCookieOpts: Record<string, any> = { ...accessCookieOptions };
     if (isRememberMe) {
-      cookieOpts.expires = expiresAt;
+      refreshCookieOpts.expires = expiresAt;
+      accessCookieOpts.expires = expiresAt;
     }
 
     res
-      .cookie(REFRESH_COOKIE, newRawRefresh, cookieOpts)
+      .cookie(ACCESS_COOKIE, accessToken, accessCookieOpts)
+      .cookie(REFRESH_COOKIE, newRawRefresh, refreshCookieOpts)
       .json({
         token: accessToken,
         user: { id: user.id, username: user.username, user_group: user.user_group },
@@ -199,7 +221,10 @@ authRouter.post("/logout", async (req, res): Promise<void> => {
       .catch(() => undefined);
   }
 
-  res.clearCookie(REFRESH_COOKIE, cookieOptions).json({ success: true });
+  res
+    .clearCookie(ACCESS_COOKIE, accessCookieOptions)
+    .clearCookie(REFRESH_COOKIE, refreshCookieOptions)
+    .json({ success: true });
 });
 
 // ─── GET /me ──────────────────────────────────────────────────────────────────

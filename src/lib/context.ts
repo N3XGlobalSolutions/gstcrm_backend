@@ -10,12 +10,21 @@ export interface Context {
 }
 
 export function createContext({ req, res }: trpcExpress.CreateExpressContextOptions): Context {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  let token: string | undefined;
+
+  // 1. Check HttpOnly cookie first
+  if (req.cookies && (req.cookies.access_token || req.cookies.token)) {
+    token = req.cookies.access_token || req.cookies.token;
+  }
+  // 2. Fallback to Authorization header if present
+  else if (req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
+    token = req.headers.authorization.split(" ")[1];
+  }
+
+  if (!token) {
     return { user: null };
   }
 
-  const token = authHeader.split(" ")[1]!;
   try {
     const decoded = verifyToken(token) as NonNullable<Context["user"]>;
     return { user: decoded };
