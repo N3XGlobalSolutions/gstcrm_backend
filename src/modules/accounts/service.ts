@@ -36,7 +36,7 @@ export async function listAccounts(input: z.infer<typeof ListAccountsSchema>) {
       const balances = await getAggregateBalances(acc.id);
       return {
         ...acc,
-        opening_pure_balance: balances.balancePure.toFixed(8),
+        opening_pure_balance: balances.totalPure.toFixed(3),
         opening_cash_balance: balances.totalCash.toFixed(2),
       };
     })
