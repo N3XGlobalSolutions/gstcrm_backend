@@ -152,8 +152,10 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
     const entriesToInsert = [];
     for (const entry of input.entries) {
       // Compute pure_quantity from purity, or use direct override if provided
+      // NOTE: must check !== undefined, NOT truthiness — "0" is a valid override
+      // (used by cash-mode purchases to suppress pure balance accumulation)
       let pureQuantity: string | undefined;
-      if (entry.pureQuantity) {
+      if (entry.pureQuantity !== undefined) {
         pureQuantity = entry.pureQuantity;
       } else if (entry.purity) {
         pureQuantity = toQuantityString(calcPure(entry.quantity, entry.purity));

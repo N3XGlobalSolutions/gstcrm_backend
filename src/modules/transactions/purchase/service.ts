@@ -80,14 +80,10 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     const opening = batchBalances[d.group.id]!;
 
     // openingPure: prior net pure grams owed (negated — positive = shop owes supplier)
-    // openingCash: exact rupee balance owed to supplier
-    //   = (goldCashOut − goldCashIn) (Σ pure × rate per bill, reversal-netted)
-    //     − totalCash (payments already received)
-    //   This reflects each bill's own rate without any re-multiplication, and netting
-    //   goldCashIn cancels a reversed bill's gold value so edited bills stay correct.
     const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
-    const rateNum = parseFloat(d.group.rate_per_gram || "0");
-    const openingCashNum = rateNum > 0 ? openingPureNum * rateNum : 0;
+
+    // openingCash: prior net cash owed (negated — positive = shop owes supplier)
+    const openingCashNum = -parseFloat(opening.totalCash.toString() || "0");
 
     return {
       ...d,
@@ -169,12 +165,11 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   // edit form can rehydrate each field independently — without this the form cannot see
   // the discount, sends back "0", and the reverse-and-recreate update silently erases it.
   const discountEntries = moneyEntries.filter((e) => e.entry.remarks === "Discount");
-  const paymentEntries = moneyEntries.filter((e) => e.entry.remarks !== "Discount");
+  const paymentEntries = moneyEntries.filter((e) => e.entry.remarks !== "Discount" && e.entry.remarks !== "Cash Purchase Charge");
 
-  // Opening Cash is ALWAYS Opening Pure × Rate (consistent everywhere)
-  const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
-  const rateNum = parseFloat(tx.group.rate_per_gram || lastGroup?.rate_per_gram || "0");
-  const openingCashBalance = toDecimal(openingPureNum * rateNum);
+  // Opening Cash & Pure: negated for supplier (positive = shop owes supplier)
+  const openingPureBalance = opening.balancePure.negated();
+  const openingCashBalance = opening.totalCash.negated();
 
   return {
     ...tx,
@@ -183,7 +178,7 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
     moneyEntries,
     paymentEntries,
     discountEntries,
-    openingPure: opening.balancePure.toString(),
+    openingPure: openingPureBalance.toString(),
     openingCash: openingCashBalance.toFixed(2),
     lastRate: lastGroup?.rate_per_gram || "0",
     matchingSale: saleGroup ? {
@@ -242,19 +237,20 @@ export async function createPurchase(
       rate: item.rate ?? input.rate_per_gram,
       pureQuantity: isCashMode ? "0" : undefined,
     })),
-    // In CASH mode: record the cash value of the purchase as a cash credit to the supplier
+    // In CASH mode: record the cash value of the purchase as a cash charge from the supplier to shop.
+    // Direction: supplier → SHOP (same as gold entries), so Supplier ledger registers cash outflow.
     ...(isCashMode && totalPurchaseCashVal.gt(0)
       ? [
           {
-            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-            toAccountId: input.account_id,
+            fromAccountId: input.account_id,
+            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
             itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
             quantity: totalPurchaseCashVal.toFixed(2),
             remarks: "Cash Purchase Charge",
           },
         ]
       : []),
-    // Money paid to supplier (shop pays out cash)
+    // Money paid to supplier (shop pays out cash: SHOP → supplier)
     ...(toDecimal(input.bank_amount).gt(0)
       ? [
           {
@@ -266,8 +262,7 @@ export async function createPurchase(
           },
         ]
       : []),
-    // Discount — shop deducts from what it owes the supplier.
-    // SHOP → SUPPLIER: reduces shop's outstanding payable to supplier.
+    // Discount — shop deducts from what it owes the supplier (SHOP → supplier)
     ...(totalDiscountCash.gt(0)
       ? [
           {
@@ -518,3 +513,94 @@ export async function undoGSTPurchaseConversion(purchaseId: string) {
   });
 }
 
+// ─── Remarks-based cash balance for purchases ─────────────────────────────────
+// openingCash = Σ(Cash Purchase Charge) − Σ(bank payments) − Σ(discounts)
+// Works regardless of entry direction (old SHOP→supplier vs new supplier→SHOP)
+// because we categorize by `remarks` field, not by from/to direction.
+
+const CASH_PURCHASE_CHARGE_REMARK = "Cash Purchase Charge";
+const DISCOUNT_REMARK = "Discount";
+
+async function getPurchaseCashBalance(
+  accountId: string,
+  asOfDate: Date,
+  excludeGroupId: string,
+): Promise<string> {
+  const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
+
+  const [row] = await db.execute<{
+    cash_charges: string | null;
+    bank_payments: string | null;
+    discounts: string | null;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(CASE WHEN e.remarks = ${CASH_PURCHASE_CHARGE_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS cash_charges,
+      COALESCE(SUM(CASE WHEN e.remarks != ${CASH_PURCHASE_CHARGE_REMARK} AND e.remarks != ${DISCOUNT_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS bank_payments,
+      COALESCE(SUM(CASE WHEN e.remarks = ${DISCOUNT_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS discounts
+    FROM entries e
+    LEFT JOIN entry_groups g ON e.group_id = g.id
+    WHERE e.item_id = ${cashItemId}
+      AND (e.to_account_id = ${accountId} OR e.from_account_id = ${accountId})
+      AND e.created_at <= ${asOfDate.toISOString()}
+      AND e.group_id != ${excludeGroupId}
+      AND g.type = 'PURCHASE'
+      AND g.is_deleted = false
+  `);
+
+  const charges = parseFloat(row?.cash_charges ?? "0");
+  const payments = parseFloat(row?.bank_payments ?? "0");
+  const discounts = parseFloat(row?.discounts ?? "0");
+  return (charges - payments - discounts).toFixed(2);
+}
+
+async function getPurchaseBatchCashBalances(
+  tuples: { id: string; accountId: string; createdAt: Date; excludeGroupId: string }[],
+): Promise<Record<string, number>> {
+  if (tuples.length === 0) return {};
+
+  const cashItemId = SYSTEM_ITEMS.RUPEE_ITEM_ID;
+
+  const valuesChunks = tuples.map(
+    (t) => sql`(${t.id}::text, ${t.accountId}::uuid, ${t.createdAt.toISOString()}::timestamp, ${t.excludeGroupId}::uuid)`
+  );
+
+  const rows = await db.execute<{
+    id: string;
+    cash_charges: string | null;
+    bank_payments: string | null;
+    discounts: string | null;
+  }>(sql`
+    WITH params(id, account_id, created_at, exclude_group_id) AS (
+      VALUES ${sql.join(valuesChunks, sql`, `)}
+    )
+    SELECT
+      p.id,
+      COALESCE(SUM(CASE WHEN e.remarks = ${CASH_PURCHASE_CHARGE_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS cash_charges,
+      COALESCE(SUM(CASE WHEN e.remarks != ${CASH_PURCHASE_CHARGE_REMARK} AND e.remarks != ${DISCOUNT_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS bank_payments,
+      COALESCE(SUM(CASE WHEN e.remarks = ${DISCOUNT_REMARK} THEN e.quantity ELSE 0 END), 0)::text AS discounts
+    FROM params p
+    LEFT JOIN entries e ON
+      (e.to_account_id = p.account_id OR e.from_account_id = p.account_id)
+      AND e.item_id = ${cashItemId}
+      AND e.created_at <= p.created_at
+      AND e.group_id != p.exclude_group_id
+    LEFT JOIN entry_groups g ON e.group_id = g.id AND g.type = 'PURCHASE' AND g.is_deleted = false
+    WHERE g.id IS NOT NULL OR e.id IS NULL
+    GROUP BY p.id
+  `);
+
+  const results: Record<string, number> = {};
+  for (const row of rows) {
+    const charges = parseFloat(row.cash_charges ?? "0");
+    const payments = parseFloat(row.bank_payments ?? "0");
+    const discounts = parseFloat(row.discounts ?? "0");
+    results[row.id] = charges - payments - discounts;
+  }
+
+  // Default any missing IDs to 0
+  for (const t of tuples) {
+    if (results[t.id] === undefined) results[t.id] = 0;
+  }
+
+  return results;
+}

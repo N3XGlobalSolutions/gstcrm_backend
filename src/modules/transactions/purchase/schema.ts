@@ -41,6 +41,7 @@ export const CreatePurchaseSchema = z.object({
   bank_details: z.string().optional(),
   discount: nonNegativeDecimalSchema.optional(),
   discount_pure: nonNegativeDecimalSchema.optional(),
+  balance_mode: z.enum(['PURE', 'CASH']).default('PURE'),
 });
 
 export const UpdatePurchaseSchema = CreatePurchaseSchema.extend({

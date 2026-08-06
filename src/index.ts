@@ -2,6 +2,7 @@ import "./config/env"; // Validates all env variables at startup — if any are 
 import app from "./app";
 import { env } from "./config/env";
 import { db } from "./db";
+import { sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ensureSystemAccountsAndItems } from "./db/seed";
 
