@@ -30,9 +30,7 @@ const MODULES_FORMS: Array<{ module: string; form_name: string }> = [
   { module: "settings", form_name: "company" },
 ];
 
-async function seed() {
-  console.log("🌱 Starting seed...");
-
+export async function ensureSystemAccountsAndItems() {
   // ── 1. System accounts ────────────────────────────────────────────────────
   const systemAccountsToCreate = [
     {
@@ -84,8 +82,6 @@ async function seed() {
         is_system_account: true,
       });
       console.log(`✅ System account created: ${acc.name}`);
-    } else {
-      console.log(`ℹ️  System account already exists: ${acc.name}`);
     }
   }
 
@@ -105,9 +101,13 @@ async function seed() {
       unit: "RUPEE",
     });
     console.log("✅ RUPEE system item created");
-  } else {
-    console.log("ℹ️  RUPEE item already exists");
   }
+}
+
+async function seed() {
+  console.log("🌱 Starting seed...");
+
+  await ensureSystemAccountsAndItems();
 
   // ── 3. Admin user ─────────────────────────────────────────────────────────
   const [existingAdmin] = await db
@@ -180,10 +180,11 @@ async function seed() {
   }
 
   console.log("🌱 Seed complete.");
-  process.exit(0);
 }
 
-seed().catch((err) => {
-  console.error("❌ Seed failed:", err);
-  process.exit(1);
-});
+if (process.argv[1]?.endsWith("seed.ts")) {
+  seed().then(() => process.exit(0)).catch((err) => {
+    console.error("❌ Seed failed:", err);
+    process.exit(1);
+  });
+}

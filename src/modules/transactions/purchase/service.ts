@@ -210,6 +210,18 @@ export async function createPurchase(
   const discountPureAsCash = rateNum.gt(0) ? discountPureGrams.times(rateNum) : toDecimal('0');
   const totalDiscountCash = discountCash.plus(discountPureAsCash);
 
+  const isCashMode = input.balance_mode === "CASH";
+
+  // Calculate total cash value for items
+  let totalPurchaseCashVal = toDecimal(0);
+  allItems.forEach((item) => {
+    const qty = toDecimal(item.quantity);
+    const pur = toDecimal(item.purity);
+    const pure = qty.times(pur).div(100);
+    const r = toDecimal(item.rate ?? input.rate_per_gram ?? '0');
+    totalPurchaseCashVal = totalPurchaseCashVal.plus(pure.times(r));
+  });
+
   // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [
     ...input.gold_items.map((item) => ({
@@ -218,8 +230,8 @@ export async function createPurchase(
       itemId: item.item_id,
       quantity: item.quantity,
       purity: item.purity,
-      // Use item-specific rate; fall back to group rate only if none provided
       rate: item.rate ?? input.rate_per_gram,
+      pureQuantity: isCashMode ? "0" : undefined,
     })),
     ...input.ornament_items.map((item) => ({
       fromAccountId: input.account_id,
@@ -227,9 +239,21 @@ export async function createPurchase(
       itemId: item.item_id,
       quantity: item.quantity,
       purity: item.purity,
-      // Use item-specific rate; fall back to group rate only if none provided
       rate: item.rate ?? input.rate_per_gram,
+      pureQuantity: isCashMode ? "0" : undefined,
     })),
+    // In CASH mode: record the cash value of the purchase as a cash credit to the supplier
+    ...(isCashMode && totalPurchaseCashVal.gt(0)
+      ? [
+          {
+            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            toAccountId: input.account_id,
+            itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+            quantity: totalPurchaseCashVal.toFixed(2),
+            remarks: "Cash Purchase Charge",
+          },
+        ]
+      : []),
     // Money paid to supplier (shop pays out cash)
     ...(toDecimal(input.bank_amount).gt(0)
       ? [

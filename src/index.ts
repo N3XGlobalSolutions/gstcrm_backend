@@ -3,7 +3,7 @@ import app from "./app";
 import { env } from "./config/env";
 import { db } from "./db";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { sql } from "drizzle-orm";
+import { ensureSystemAccountsAndItems } from "./db/seed";
 
 // ─── Neon Keep-Alive Ping ──────────────────────────────────────────────────────
 function startKeepAlive() {
@@ -26,8 +26,11 @@ async function start() {
     console.log("⏳ Running database migrations...");
     await migrate(db, { migrationsFolder: "./src/db/migrations" });
     console.log("✅ Database migrations completed successfully!");
+
+    await ensureSystemAccountsAndItems();
+    console.log("✅ System accounts and items verified!");
   } catch (error) {
-    console.error("❌ Migration failed:", error);
+    console.error("❌ Migration/Seeding failed:", error);
     process.exit(1);
   }
 

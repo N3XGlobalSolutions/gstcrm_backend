@@ -278,6 +278,9 @@ export async function getAccountAggregateBalances(
     lastRate: lastGroup?.rate_per_gram ?? null,
     // Opening Cash is ALWAYS Opening Pure × Rate (consistent everywhere)
     goldCashBalance: goldCashBalance.toFixed(2),
+    // True independent cash ledger balance (cash inflow - cash outflow, no gold conversion).
+    // Use this as the opening cash when the bill is in Cash mode.
+    cashBalance: balances.totalCash.toFixed(2),
     // Net grams from rate-less opening-pure entries — carried forward as grams as-is,
     // since they have no cash side and must not be routed through the cash-first balance.
     pureNoRate: balances.pureNoRate.toFixed(3),

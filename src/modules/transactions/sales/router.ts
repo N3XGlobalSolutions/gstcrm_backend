@@ -41,4 +41,15 @@ export const salesRouter = router({
   delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(async ({ input, ctx }) => deleteSale(input, ctx.user!)),
   updateGSTConversion: guardedProcedure("sales", "sales", "edit").input(UpdateGSTConversionSchema).mutation(async ({ input }) => updateGSTConversion(input)),
   undoGSTConversion: guardedProcedure("sales", "sales", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTConversion(input.id)),
+  getLatestPurchaseRate: guardedProcedure("sales", "sales", "view").query(async () => {
+    const res = await db.execute(sql`
+      SELECT rate_per_gram 
+      FROM entry_groups 
+      WHERE type = 'PURCHASE' AND is_deleted = false
+      ORDER BY date DESC, entry_no DESC 
+      LIMIT 1
+    `);
+    const rate = res[0]?.rate_per_gram ? Number(res[0].rate_per_gram) : 0;
+    return { rate };
+  }),
 });

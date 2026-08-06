@@ -360,21 +360,34 @@ export async function createSale(
     const discountPureGrams = toDecimal(input.discount_pure ?? "0");
     const totalDiscountCash = discountCash.plus(discountPureAsCash);
 
+    const isCashMode = input.balance_mode === "CASH";
+
     const entryInputs = [
       ...processedItems.map((item) => ({
         fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
         toAccountId: input.account_id,
         itemId: item.item_id,
         lotId: item.lot_id,
-        // Wastage on a SALE is a PROFIT line, not physical gold. Only the physical
-        // weight leaves stock; the customer is billed for the gross pure
-        // (weight + wastage) × touch/100 via the pure_quantity override.
         quantity: item.quantity,          // physical weight only → correct stock
-        pureQuantity: item.grossPureStr,  // (weight + wastage) × touch/100 → billed value
+        // In CASH mode, the customer is billed in cash, so gold pure balance is NOT affected (pureQuantity = 0).
+        // In PURE mode, customer owes pure gold (pureQuantity = grossPureStr).
+        pureQuantity: isCashMode ? "0" : item.grossPureStr,
         purity: item.purity,
         wastageMode: item.wastage_mode as "PERCENT" | "GRAM",
         wastageValue: item.wastage_value,
       })),
+      // In CASH mode: record the total cash value of the sale as a cash debit on the customer's account
+      ...(isCashMode && pureValueCash.gt(0)
+        ? [
+            {
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: input.account_id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: pureValueCash.toFixed(2),
+              remarks: "Cash Sale Charge",
+            },
+          ]
+        : []),
       // Cash received from customer
       ...(toDecimal(input.bank_amount).gt(0)
         ? [

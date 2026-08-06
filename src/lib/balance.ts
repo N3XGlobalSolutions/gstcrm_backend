@@ -191,12 +191,12 @@ export async function getAggregateBalances(
 
   const pureBalance = subtractDecimals(pureInflow, pureOutflow);
   const cashBalance = subtractDecimals(cashInflow, cashOutflow);
-  const balancePureBeforeCash = pureBalance.minus(paymentPure);
 
   return {
     totalPure: pureBalance,
     totalCash: cashBalance,
-    balancePure: balancePureBeforeCash,
+    // Pure Gold balance is strictly net pure gold grams — 100% separate from cash.
+    balancePure: pureBalance,
     goldCashOut,
     goldCashIn,
     pureNoRate,
@@ -295,12 +295,11 @@ export async function getBatchAggregateBalances(
 
     const pureBalance = subtractDecimals(pureInflow, pureOutflow);
     const cashBalance = subtractDecimals(cashInflow, cashOutflow);
-    const balancePureBeforeCash = pureBalance.minus(paymentPure);
 
     results[row.id] = {
       totalPure: pureBalance,
       totalCash: cashBalance,
-      balancePure: balancePureBeforeCash,
+      balancePure: pureBalance,
       goldCashOut,
       goldCashIn,
     };
