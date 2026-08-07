@@ -11,6 +11,8 @@ import {
   UpdatePurchaseSchema,
   DeleteTxSchema,
   UpdateGSTPurchaseConversionSchema,
+  ConvertGoldToCashSchema,
+  ConvertCashToGoldSchema,
 } from "./schema";
 import {
   listPurchases,
@@ -21,6 +23,8 @@ import {
   updateGSTPurchaseConversion,
   listGSTPurchaseHistory,
   undoGSTPurchaseConversion,
+  convertGoldToCash,
+  convertCashToGold,
 } from "./service";
 
 export const purchaseRouter = router({
@@ -46,5 +50,7 @@ export const purchaseRouter = router({
   delete: guardedProcedure("purchase", "purchase", "delete").input(DeleteTxSchema).mutation(async ({ input }) => deletePurchase(input)),
   updateGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(UpdateGSTPurchaseConversionSchema).mutation(async ({ input }) => updateGSTPurchaseConversion(input)),
   undoGSTPurchaseConversion: guardedProcedure("purchase", "purchase", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTPurchaseConversion(input.id)),
+  convertGoldToCash: guardedProcedure("purchase", "purchase", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),
+  convertCashToGold: guardedProcedure("purchase", "purchase", "edit").input(ConvertCashToGoldSchema).mutation(async ({ input }) => convertCashToGold(input)),
 });
 

@@ -7,6 +7,7 @@ import {
   calcWastageGram,
   toDecimal,
   toQuantityString,
+  Decimal,
 } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import {
@@ -26,6 +27,8 @@ import type {
   CreateSalesSchema,
   UpdateSalesSchema,
   DeleteTxSchema,
+  ConvertGoldToCashSchema,
+  ConvertCashToGoldSchema,
 } from "./schema";
 
 export async function listSales(input: z.infer<typeof ListTxSchema>) {
@@ -174,6 +177,124 @@ export async function getSaleById(input: z.infer<typeof GetByIdSchema>) {
       entries: purchaseEntries
     } : null
   };
+}
+
+/**
+ * Converts part of a customer's outstanding pure-gold balance into a cash debt.
+ *
+ * Mirror of the Purchase-side conversion, but with entry directions reversed:
+ * Sales accounts use the RAW (unnegated) balancePure/totalCash as "positive =
+ * customer owes shop" (see SalesPage.tsx's opening-balance fetch — no negation
+ * applied there), whereas Purchase negates. Both entries use RUPEE_ITEM_ID and
+ * SHOP_ID as the counterparty so neither is picked up by item-level stock
+ * queries — stock-on-hand stays untouched, same as the Purchase-side version.
+ *
+ * Entry 1 reduces gold owed: customer → SHOP, pureQuantity override = gold_grams,
+ * quantity "0" (no cash effect). Entry 2 raises cash owed: SHOP → customer,
+ * quantity = cash_amount.
+ */
+export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
+  const goldGrams = toDecimal(input.gold_grams);
+  const cashAmount = toDecimal(input.cash_amount);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingPure = opening.balancePure; // raw, unnegated — positive = customer owes shop
+
+  if (openingPure.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This customer has no outstanding gold balance to convert.");
+  }
+  if (goldGrams.gt(openingPure.plus(0.001))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ${goldGrams.toFixed(3)}g — only ${openingPure.toFixed(3)}g of gold is outstanding for this customer.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Gold to Cash Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries: createdEntries } = await createEntryGroup({
+    type: "SALE",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    entries: [
+      {
+        // Reduces gold owed by the customer
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+      {
+        // Raises cash owed by the customer
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries: createdEntries };
+}
+
+/**
+ * The opposite of convertGoldToCash: converts part of a customer's outstanding
+ * cash debt into a pure-gold debt, at an agreed rate.
+ */
+export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
+  const cashAmount = toDecimal(input.cash_amount);
+  const goldGrams = toDecimal(input.gold_grams);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingCash = opening.totalCash; // raw, unnegated — positive = customer owes shop
+
+  if (openingCash.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This customer has no outstanding cash balance to convert.");
+  }
+  if (cashAmount.gt(openingCash.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${openingCash.toFixed(2)} of cash is outstanding for this customer.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Cash to Gold Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries: createdEntries } = await createEntryGroup({
+    type: "SALE",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    entries: [
+      {
+        // Reduces cash owed by the customer
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+      {
+        // Raises gold owed by the customer
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries: createdEntries };
 }
 
 export async function createSale(

@@ -1,7 +1,7 @@
 import { AppError } from "@/types/errors";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
-import { toQuantityString, toDecimal } from "@/lib/decimal";
+import { toQuantityString, toDecimal, Decimal } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import { listTransactions, getTransactionById, generateBillNo } from "@/lib/transactionQueries";
 import { db } from "@/db";
@@ -15,6 +15,8 @@ import type {
   CreatePurchaseSchema,
   UpdatePurchaseSchema,
   DeleteTxSchema,
+  ConvertGoldToCashSchema,
+  ConvertCashToGoldSchema,
 } from "./schema";
 
 export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
@@ -207,15 +209,51 @@ export async function createPurchase(
 
   const isCashMode = input.balance_mode === "CASH";
 
-  // Calculate total cash value for items
+  // Calculate total cash value and total pure weight for items
   let totalPurchaseCashVal = toDecimal(0);
+  let totalPureQty = toDecimal(0);
   allItems.forEach((item) => {
     const qty = toDecimal(item.quantity);
     const pur = toDecimal(item.purity);
     const pure = qty.times(pur).div(100);
     const r = toDecimal(item.rate ?? input.rate_per_gram ?? '0');
     totalPurchaseCashVal = totalPurchaseCashVal.plus(pure.times(r));
+    totalPureQty = totalPureQty.plus(pure);
   });
+
+  // ─── Overpayment guard ─────────────────────────────────────────────────────
+  // The bank payment on this bill must never push the supplier's balance below
+  // zero — i.e. bank_amount can't exceed (opening balance + this bill's value −
+  // discounts). Mirrors the client-side guard in PurchasePage.tsx, but this is
+  // the authoritative check since tRPC can be called directly, bypassing the UI.
+  // On an edit, updatePurchase() reverses the original bill first, so the
+  // balance read here is already "as if this bill didn't exist yet".
+  const bankAmt = toDecimal(input.bank_amount || "0");
+  if (bankAmt.gt(0)) {
+    const opening = await getAggregateBalances(input.account_id);
+    const openingCash = opening.totalCash.negated(); // positive = shop owes supplier
+    const openingPure = opening.balancePure.negated();
+
+    let maxBankPayment: Decimal;
+    if (isCashMode) {
+      maxBankPayment = openingCash.plus(totalPurchaseCashVal).minus(totalDiscountCash);
+    } else {
+      const effectiveRate = totalPureQty.gt(0) && totalPurchaseCashVal.gt(0)
+        ? totalPurchaseCashVal.div(totalPureQty)
+        : rateNum;
+      const discountCashAsPure = effectiveRate.gt(0) ? discountCash.div(effectiveRate) : toDecimal(0);
+      const maxBalancePure = openingPure.plus(totalPureQty).minus(discountPureGrams).minus(discountCashAsPure);
+      maxBankPayment = maxBalancePure.times(effectiveRate);
+    }
+
+    if (bankAmt.gt(maxBankPayment.plus(0.01))) {
+      const cappedMax = maxBankPayment.lt(0) ? toDecimal(0) : maxBankPayment;
+      throw new AppError(
+        "VALIDATION_ERROR",
+        `Payment ₹${bankAmt.toFixed(2)} exceeds the outstanding balance of ₹${cappedMax.toFixed(2)}. Payment cannot exceed total owed.`,
+      );
+    }
+  }
 
   // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [
@@ -285,6 +323,129 @@ export async function createPurchase(
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     entries: entryInputs,
+  });
+
+  return { group, entries };
+}
+
+/**
+ * Converts part of a purchaser's outstanding pure-gold balance into a cash debt.
+ *
+ * Pure ledger reclassification — the gold never physically moves (it's already in
+ * shop stock from the original purchase), so both entries use RUPEE_ITEM_ID and
+ * SHOP_ID as the counterparty. Using RUPEE_ITEM_ID (not a real gold item) means
+ * neither entry is ever picked up by item-level stock queries, which only look at
+ * specific GOLD/ORNAMENT item ids — so stock-on-hand is untouched, exactly like the
+ * existing "opening pure balance" entries created in accounts/service.ts.
+ *
+ * Entry 1 reduces gold owed: SHOP → supplier, pureQuantity override = gold_grams,
+ * quantity "0" (no cash effect). Entry 2 raises cash owed: supplier → SHOP,
+ * quantity = cash_amount (mirrors the "Cash Purchase Charge" direction).
+ */
+export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
+  const goldGrams = toDecimal(input.gold_grams);
+  const cashAmount = toDecimal(input.cash_amount);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingPure = opening.balancePure.negated(); // positive = shop owes supplier
+
+  if (openingPure.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding gold balance to convert.");
+  }
+  if (goldGrams.gt(openingPure.plus(0.001))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ${goldGrams.toFixed(3)}g — only ${openingPure.toFixed(3)}g of gold is outstanding for this account.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Gold to Cash Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries } = await createEntryGroup({
+    type: "PURCHASE",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    entries: [
+      {
+        // Reduces gold owed to the supplier
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+      {
+        // Raises cash owed to the supplier
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
+}
+
+/**
+ * The opposite of convertGoldToCash: converts part of a purchaser's outstanding
+ * cash debt into a pure-gold debt, at an agreed rate. Same RUPEE_ITEM_ID +
+ * SHOP_ID trick, entries simply reversed — stock-on-hand stays untouched.
+ *
+ * Entry 1 reduces cash owed: SHOP → supplier, quantity = cash_amount (mirrors
+ * a normal bank payment). Entry 2 raises gold owed: supplier → SHOP,
+ * pureQuantity override = gold_grams, quantity "0" (no cash effect).
+ */
+export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
+  const cashAmount = toDecimal(input.cash_amount);
+  const goldGrams = toDecimal(input.gold_grams);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingCash = opening.totalCash.negated(); // positive = shop owes supplier
+
+  if (openingCash.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding cash balance to convert.");
+  }
+  if (cashAmount.gt(openingCash.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${openingCash.toFixed(2)} of cash is outstanding for this account.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Cash to Gold Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries } = await createEntryGroup({
+    type: "PURCHASE",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    entries: [
+      {
+        // Reduces cash owed to the supplier
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+      {
+        // Raises gold owed to the supplier
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+    ],
   });
 
   return { group, entries };

@@ -10,6 +10,8 @@ import {
   UpdateSalesSchema,
   DeleteTxSchema,
   UpdateGSTConversionSchema,
+  ConvertGoldToCashSchema,
+  ConvertCashToGoldSchema,
 } from "./schema";
 import {
   listSales,
@@ -20,6 +22,8 @@ import {
   updateGSTConversion,
   listGSTHistory,
   undoGSTConversion,
+  convertGoldToCash,
+  convertCashToGold,
 } from "./service";
 
 export const salesRouter = router({
@@ -41,6 +45,8 @@ export const salesRouter = router({
   delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(async ({ input, ctx }) => deleteSale(input, ctx.user!)),
   updateGSTConversion: guardedProcedure("sales", "sales", "edit").input(UpdateGSTConversionSchema).mutation(async ({ input }) => updateGSTConversion(input)),
   undoGSTConversion: guardedProcedure("sales", "sales", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTConversion(input.id)),
+  convertGoldToCash: guardedProcedure("sales", "sales", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),
+  convertCashToGold: guardedProcedure("sales", "sales", "edit").input(ConvertCashToGoldSchema).mutation(async ({ input }) => convertCashToGold(input)),
   getLatestPurchaseRate: guardedProcedure("sales", "sales", "view").query(async () => {
     const res = await db.execute(sql`
       SELECT rate_per_gram 

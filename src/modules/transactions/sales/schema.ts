@@ -67,6 +67,30 @@ export const UpdateSalesSchema = CreateSalesSchema.extend({
   id: z.string().uuid(),
 });
 
+// ─── Gold-to-Cash / Cash-to-Gold conversion ──────────────────────────────────
+// Converts part of a customer's outstanding pure-gold balance into a cash debt
+// (or vice versa), at an agreed rate. Purely a ledger reclassification — no
+// items/stock involved.
+export const ConvertGoldToCashSchema = z.object({
+  account_id: z.string().uuid(),
+  gold_grams: positiveDecimalSchema,      // pure gold grams being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
+  cash_amount: positiveDecimalSchema,     // = gold_grams × rate_per_gram (pre-computed by frontend)
+}).refine(
+  d => Math.abs(parseFloat(d.gold_grams) * parseFloat(d.rate_per_gram) - parseFloat(d.cash_amount)) < 0.01,
+  { message: "cash_amount must equal gold_grams × rate_per_gram (within ₹0.01 tolerance)", path: ["cash_amount"] }
+);
+
+export const ConvertCashToGoldSchema = z.object({
+  account_id: z.string().uuid(),
+  cash_amount: positiveDecimalSchema,     // cash being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
+  gold_grams: positiveDecimalSchema,      // = cash_amount / rate_per_gram (pre-computed by frontend)
+}).refine(
+  d => Math.abs(parseFloat(d.cash_amount) - parseFloat(d.gold_grams) * parseFloat(d.rate_per_gram)) < 0.01,
+  { message: "cash_amount must equal gold_grams × rate_per_gram (within ₹0.01 tolerance)", path: ["gold_grams"] }
+);
+
 export const UpdateGSTConversionSchema = z.object({
   id: z.string().uuid(),
   gst_amount: nonNegativeDecimalSchema,
