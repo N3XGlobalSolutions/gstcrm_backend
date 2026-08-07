@@ -71,25 +71,24 @@ export const UpdateSalesSchema = CreateSalesSchema.extend({
 // Converts part of a customer's outstanding pure-gold balance into a cash debt
 // (or vice versa), at an agreed rate. Purely a ledger reclassification — no
 // items/stock involved.
+// The derived value (cash_amount / gold_grams) is NOT accepted from the client —
+// the two typed values are the only source of truth, and the server computes
+// the third. Accepting a client-computed value and cross-checking it against a
+// fixed tolerance broke in production: the frontend rounds gold_grams to 3dp for
+// display, and at some rates that rounding alone exceeds any small fixed
+// tolerance (e.g. 2.467g × ₹15,000 is ₹5 off from an unrounded ₹37,000 cash
+// figure) — rejecting a perfectly valid conversion.
 export const ConvertGoldToCashSchema = z.object({
   account_id: z.string().uuid(),
   gold_grams: positiveDecimalSchema,      // pure gold grams being converted — must be > 0
   rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
-  cash_amount: positiveDecimalSchema,     // = gold_grams × rate_per_gram (pre-computed by frontend)
-}).refine(
-  d => Math.abs(parseFloat(d.gold_grams) * parseFloat(d.rate_per_gram) - parseFloat(d.cash_amount)) < 0.01,
-  { message: "cash_amount must equal gold_grams × rate_per_gram (within ₹0.01 tolerance)", path: ["cash_amount"] }
-);
+});
 
 export const ConvertCashToGoldSchema = z.object({
   account_id: z.string().uuid(),
   cash_amount: positiveDecimalSchema,     // cash being converted — must be > 0
   rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
-  gold_grams: positiveDecimalSchema,      // = cash_amount / rate_per_gram (pre-computed by frontend)
-}).refine(
-  d => Math.abs(parseFloat(d.cash_amount) - parseFloat(d.gold_grams) * parseFloat(d.rate_per_gram)) < 0.01,
-  { message: "cash_amount must equal gold_grams × rate_per_gram (within ₹0.01 tolerance)", path: ["gold_grams"] }
-);
+});
 
 export const UpdateGSTConversionSchema = z.object({
   id: z.string().uuid(),

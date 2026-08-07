@@ -195,7 +195,8 @@ export async function getSaleById(input: z.infer<typeof GetByIdSchema>) {
  */
 export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
   const goldGrams = toDecimal(input.gold_grams);
-  const cashAmount = toDecimal(input.cash_amount);
+  // Derived, not trusted from the client — see schema.ts for why.
+  const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
 
   const opening = await getAggregateBalances(input.account_id);
   const openingPure = opening.balancePure; // raw, unnegated — positive = customer owes shop
@@ -249,7 +250,9 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
  */
 export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
   const cashAmount = toDecimal(input.cash_amount);
-  const goldGrams = toDecimal(input.gold_grams);
+  const rate = toDecimal(input.rate_per_gram);
+  // Derived, not trusted from the client — see schema.ts for why.
+  const goldGrams = cashAmount.div(rate);
 
   const opening = await getAggregateBalances(input.account_id);
   const openingCash = opening.totalCash; // raw, unnegated — positive = customer owes shop
