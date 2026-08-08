@@ -59,6 +59,15 @@ export async function reverseEntryGroup(originalGroupId: string) {
         itemId: e.item_id,
         quantity: e.quantity,
         purity: e.purity ?? undefined,
+        // MUST pass the original pure_quantity through explicitly. Without it,
+        // createEntryGroup falls back to recomputing pure_quantity from
+        // quantity × purity — which is correct for a normal item, but wrong for
+        // any entry whose pure_quantity was deliberately overridden (cash-mode
+        // purchase/sale items forced to "0", Convert-feature entries, opening
+        // balances). A cash-mode item's pure_quantity=0 was getting reversed
+        // into pure_quantity=quantity×purity instead of staying 0, injecting
+        // phantom grams into the account's pure balance on every edit.
+        pureQuantity: e.pure_quantity ?? undefined,
         lotId: e.lot_id ?? undefined, // preserve lot_id so stock balances cancel out
         wastageMode: e.wastage_mode as "PERCENT" | "GRAM" | undefined,
         wastageValue: e.wastage_value ?? undefined,
