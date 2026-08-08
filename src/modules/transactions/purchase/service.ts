@@ -221,7 +221,9 @@ export async function createPurchase(
     totalPureQty = totalPureQty.plus(pure);
   });
 
-
+  // Overpayment guard removed by request — bank_amount is no longer capped
+  // against the supplier's outstanding balance. A payment larger than what's
+  // owed is now accepted and will push the balance negative.
 
   // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [

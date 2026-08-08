@@ -336,7 +336,9 @@ export async function createSale(
   // Steps 5–7 inside one transaction so the SELECT FOR UPDATE lock is held
   // through the insert — prevents two concurrent sales from overselling the same lot.
   return db.transaction(async (tx) => {
-    // Overpayment validation check
+    // Overpayment guard removed by request — bank_amount is no longer capped
+    // against the customer's outstanding balance. A payment larger than what's
+    // owed is now accepted and will push the balance negative.
     const ratePerGram = toDecimal(input.rate_per_gram);
     const pureValuePure = processedItems.reduce((acc, item) => {
       return acc.plus(toDecimal(item.totalQuantityStr).mul(toDecimal(item.purity).div(100)));
@@ -346,68 +348,7 @@ export async function createSale(
     const discountCash = toDecimal(input.discount ?? "0");
     const discountPure = toDecimal(input.discount_pure ?? "0");
     const discountPureAsCash = discountPure.mul(ratePerGram);
-    const tdsAmount = toDecimal(input.tds_amount ?? "0");
-    const tcsAmount = toDecimal(input.tcs_amount ?? "0");
-    const bankAmount = toDecimal(input.bank_amount ?? "0");
 
-    const opening = await getAggregateBalances(input.account_id, undefined, options?.groupId);
-    const parsedOpeningPure = opening.balancePure;
-    // The real, independent cash ledger — the same value the live form shows as
-    // "Opening Cash" (accounts.getAggregateBalances returns this exact field as
-    // cashBalance). Previously this was reconstructed as pure-balance × whatever
-    // rate the customer's LAST bill happened to use — a completely different
-    // number from the real cash ledger whenever that historical rate didn't
-    // match today's. That mismatch is what rejected a customer paying their
-    // exact displayed balance in production (off by ₹0.01, but the same
-    // pure×rate anti-pattern already fixed everywhere else in this codebase).
-    const parsedOpeningCash = opening.totalCash;
-
-    if (input.balance_mode === "PURE") {
-      const bankInPure = ratePerGram.gt(0) ? bankAmount.div(ratePerGram) : toDecimal(0);
-      const discountCashAsPure = ratePerGram.gt(0) ? discountCash.div(ratePerGram) : toDecimal(0);
-      const tdsInPure = ratePerGram.gt(0) ? tdsAmount.div(ratePerGram) : toDecimal(0);
-      const tcsInPure = ratePerGram.gt(0) ? tcsAmount.div(ratePerGram) : toDecimal(0);
-
-      const totalOwedPure = parsedOpeningPure
-        .plus(pureValuePure)
-        .minus(discountPure)
-        .minus(discountCashAsPure)
-        .minus(tdsInPure)
-        .plus(tcsInPure);
-
-      // Round to paisa BEFORE comparing — bankAmount is always a clean 2dp rupee
-      // figure, but maxAllowedCash passed through several ÷rate steps above
-      // (bankInPure, discountCashAsPure, tdsInPure, tcsInPure) that can leave
-      // sub-paisa Decimal noise even when every input was a clean amount.
-      // Comparing that noisy value against a flat ₹0.01 buffer is exactly what
-      // rejected a customer paying their own displayed balance in production —
-      // rounding first means the buffer only has to absorb genuine paisa
-      // differences, not floating noise smaller than a paisa.
-      const maxAllowedCash = toDecimal(totalOwedPure.mul(ratePerGram).toFixed(2));
-      if (bankAmount.gt(maxAllowedCash.plus(0.01))) {
-        throw new AppError(
-          "BUSINESS_RULE_VIOLATION",
-          `Payment amount ₹${bankAmount.toFixed(2)} exceeds the outstanding balance ₹${Math.max(0, parseFloat(maxAllowedCash.toFixed(2)))}`
-        );
-      }
-    } else {
-      // Same paisa-rounding as above — discountPureAsCash (= discountPure × rate)
-      // and pureValueCash can each carry sub-paisa Decimal noise.
-      const totalOwedCash = toDecimal(parsedOpeningCash
-        .plus(pureValueCash)
-        .minus(discountCash)
-        .minus(discountPureAsCash)
-        .minus(tdsAmount)
-        .plus(tcsAmount)
-        .toFixed(2));
-
-      if (bankAmount.gt(totalOwedCash.plus(0.01))) {
-        throw new AppError(
-          "BUSINESS_RULE_VIOLATION",
-          `Payment amount ₹${bankAmount.toFixed(2)} exceeds the outstanding balance ₹${Math.max(0, parseFloat(totalOwedCash.toFixed(2)))}`
-        );
-      }
-    }
     // Step 5 — Lock entry rows then check stock availability
     // Gold: Checked in pooled mode (all lots combined).
     // Ornament: Checked per specific lot_id (lot_id is strictly required).
@@ -542,12 +483,16 @@ export async function createSale(
           ]
         : []),
       // TDS — shop deducts TDS from the customer's payable (reduces customer's balance).
-      // SHOP → CUSTOMER: reduces customer's net payable (equivalent to the shop absorbing TDS).
+      // CUSTOMER → SHOP: an outflow for the customer, same direction as a payment,
+      // so it reduces their net payable. (Previously coded SHOP → CUSTOMER, which
+      // is an inflow that INCREASES the customer's balance — the opposite of what
+      // this comment and the frontend's preview formula, `- tdsAmount + tcsAmount`
+      // in SalesBillingDetails.tsx, both assume.)
       ...(input.tds_enabled && toDecimal(input.tds_amount ?? "0").gt(0)
         ? [
             {
-              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-              toAccountId: input.account_id,
+              fromAccountId: input.account_id,
+              toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
               itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
               quantity: toDecimal(input.tds_amount!).toFixed(2),
               remarks: "TDS Adjustment",
@@ -555,12 +500,15 @@ export async function createSale(
           ]
         : []),
       // TCS — customer pays extra TCS to the shop (increases customer's payable).
-      // CUSTOMER → SHOP: increases customer's net payable.
+      // SHOP → CUSTOMER: an inflow for the customer, same direction as a new
+      // charge, so it increases their net payable. (Previously coded
+      // CUSTOMER → SHOP, which is an outflow that DECREASES the customer's
+      // balance — the opposite of what this comment intends.)
       ...(input.tcs_enabled && toDecimal(input.tcs_amount ?? "0").gt(0)
         ? [
             {
-              fromAccountId: input.account_id,
-              toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: input.account_id,
               itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
               quantity: toDecimal(input.tcs_amount!).toFixed(2),
               remarks: "TCS Adjustment",
