@@ -199,7 +199,8 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
   const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingPure = opening.balancePure; // raw, unnegated — positive = customer owes shop
+  // Rounded to milligrams (3dp, the ledger's own gram precision) before comparing.
+  const openingPure = toDecimal(opening.balancePure.toFixed(3)); // raw, unnegated — positive = customer owes shop
 
   if (openingPure.lte(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This customer has no outstanding gold balance to convert.");
@@ -255,7 +256,8 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
   const goldGrams = cashAmount.div(rate);
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingCash = opening.totalCash; // raw, unnegated — positive = customer owes shop
+  // Rounded to paisa before comparing — see createSale's guard for why.
+  const openingCash = toDecimal(opening.totalCash.toFixed(2)); // raw, unnegated — positive = customer owes shop
 
   if (openingCash.lte(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This customer has no outstanding cash balance to convert.");
@@ -350,24 +352,15 @@ export async function createSale(
 
     const opening = await getAggregateBalances(input.account_id, undefined, options?.groupId);
     const parsedOpeningPure = opening.balancePure;
-
-    const [lastGroup] = await tx
-      .select({ rate_per_gram: entryGroups.rate_per_gram })
-      .from(entryGroups)
-      .where(
-        and(
-          eq(entryGroups.account_id, input.account_id),
-          eq(entryGroups.is_deleted, false),
-          not(eq(entryGroups.type, "REVERSAL")),
-          isNotNull(entryGroups.rate_per_gram),
-          options?.groupId ? not(eq(entryGroups.id, options.groupId)) : undefined
-        )
-      )
-      .orderBy(desc(entryGroups.created_at))
-      .limit(1);
-
-    const lastRate = toDecimal(lastGroup?.rate_per_gram ?? "0");
-    const parsedOpeningCash = lastRate.gt(0) ? parsedOpeningPure.mul(lastRate) : toDecimal(0);
+    // The real, independent cash ledger — the same value the live form shows as
+    // "Opening Cash" (accounts.getAggregateBalances returns this exact field as
+    // cashBalance). Previously this was reconstructed as pure-balance × whatever
+    // rate the customer's LAST bill happened to use — a completely different
+    // number from the real cash ledger whenever that historical rate didn't
+    // match today's. That mismatch is what rejected a customer paying their
+    // exact displayed balance in production (off by ₹0.01, but the same
+    // pure×rate anti-pattern already fixed everywhere else in this codebase).
+    const parsedOpeningCash = opening.totalCash;
 
     if (input.balance_mode === "PURE") {
       const bankInPure = ratePerGram.gt(0) ? bankAmount.div(ratePerGram) : toDecimal(0);
@@ -382,7 +375,15 @@ export async function createSale(
         .minus(tdsInPure)
         .plus(tcsInPure);
 
-      const maxAllowedCash = totalOwedPure.mul(ratePerGram);
+      // Round to paisa BEFORE comparing — bankAmount is always a clean 2dp rupee
+      // figure, but maxAllowedCash passed through several ÷rate steps above
+      // (bankInPure, discountCashAsPure, tdsInPure, tcsInPure) that can leave
+      // sub-paisa Decimal noise even when every input was a clean amount.
+      // Comparing that noisy value against a flat ₹0.01 buffer is exactly what
+      // rejected a customer paying their own displayed balance in production —
+      // rounding first means the buffer only has to absorb genuine paisa
+      // differences, not floating noise smaller than a paisa.
+      const maxAllowedCash = toDecimal(totalOwedPure.mul(ratePerGram).toFixed(2));
       if (bankAmount.gt(maxAllowedCash.plus(0.01))) {
         throw new AppError(
           "BUSINESS_RULE_VIOLATION",
@@ -390,12 +391,15 @@ export async function createSale(
         );
       }
     } else {
-      const totalOwedCash = parsedOpeningCash
+      // Same paisa-rounding as above — discountPureAsCash (= discountPure × rate)
+      // and pureValueCash can each carry sub-paisa Decimal noise.
+      const totalOwedCash = toDecimal(parsedOpeningCash
         .plus(pureValueCash)
         .minus(discountCash)
         .minus(discountPureAsCash)
         .minus(tdsAmount)
-        .plus(tcsAmount);
+        .plus(tcsAmount)
+        .toFixed(2));
 
       if (bankAmount.gt(totalOwedCash.plus(0.01))) {
         throw new AppError(
@@ -608,6 +612,7 @@ export async function updateSale(
     .select({
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
+      account_id: entryGroups.account_id,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
@@ -615,6 +620,35 @@ export async function updateSale(
 
   if (!originalGroup) {
     throw new AppError("NOT_FOUND", "Sale not found");
+  }
+
+  // Only the account's most recent sale bill may be edited — same guard as
+  // Purchase's updatePurchase, for the same reason: editing an older bill
+  // re-stamps its created_at to "now", silently reordering it past every
+  // transaction that happened for the account in between and corrupting the
+  // running balance history. The UI already restricts Edit to the last bill
+  // per account, but that check is client-side and page/sort/filter-scoped.
+  if (originalGroup.bill_no !== null) {
+    const [newerBill] = await db
+      .select({ id: entryGroups.id })
+      .from(entryGroups)
+      .where(
+        and(
+          eq(entryGroups.account_id, originalGroup.account_id),
+          eq(entryGroups.type, "SALE"),
+          eq(entryGroups.is_deleted, false),
+          not(eq(entryGroups.id, input.id)),
+          sql`${entryGroups.bill_no} > ${originalGroup.bill_no}`,
+        ),
+      )
+      .limit(1);
+
+    if (newerBill) {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        "Only the most recent sale bill for this customer can be edited.",
+      );
+    }
   }
 
   await reverseEntryGroup(input.id);

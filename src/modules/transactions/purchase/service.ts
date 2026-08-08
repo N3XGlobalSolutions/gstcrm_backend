@@ -245,6 +245,14 @@ export async function createPurchase(
       const maxBalancePure = openingPure.plus(totalPureQty).minus(discountPureGrams).minus(discountCashAsPure);
       maxBankPayment = maxBalancePure.times(effectiveRate);
     }
+    // Round to paisa BEFORE comparing — bankAmt is always a clean 2dp rupee
+    // figure, but the PURE-mode branch above passes through a ÷rate step that
+    // can leave sub-paisa Decimal noise even when every input was clean.
+    // Comparing that noise against a flat ₹0.01 buffer is exactly what
+    // rejected a customer paying their own displayed balance in production
+    // (see Sales' createSale guard) — rounding first means the buffer only
+    // has to absorb genuine paisa differences, not floating noise.
+    maxBankPayment = toDecimal(maxBankPayment.toFixed(2));
 
     if (bankAmt.gt(maxBankPayment.plus(0.01))) {
       const cappedMax = maxBankPayment.lt(0) ? toDecimal(0) : maxBankPayment;
@@ -348,7 +356,8 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
   const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingPure = opening.balancePure.negated(); // positive = shop owes supplier
+  // Rounded to milligrams (3dp, the ledger's own gram precision) before comparing.
+  const openingPure = toDecimal(opening.balancePure.negated().toFixed(3)); // positive = shop owes supplier
 
   if (openingPure.lte(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding gold balance to convert.");
@@ -409,7 +418,8 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
   const goldGrams = cashAmount.div(rate);
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingCash = opening.totalCash.negated(); // positive = shop owes supplier
+  // Rounded to paisa before comparing — see createPurchase's guard for why.
+  const openingCash = toDecimal(opening.totalCash.negated().toFixed(2)); // positive = shop owes supplier
 
   if (openingCash.lte(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding cash balance to convert.");
@@ -460,6 +470,7 @@ export async function updatePurchase(input: z.infer<typeof UpdatePurchaseSchema>
     .select({
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
+      account_id: entryGroups.account_id,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
@@ -467,6 +478,38 @@ export async function updatePurchase(input: z.infer<typeof UpdatePurchaseSchema>
 
   if (!originalGroup) {
     throw new AppError("NOT_FOUND", "Purchase not found");
+  }
+
+  // Only the account's most recent purchase bill may be edited. Editing an
+  // older bill re-stamps its created_at to "now" (reverseEntryGroup + the
+  // recreate below both insert fresh rows, with no created_at override) — every
+  // balance query orders/filters strictly by created_at, so that silently
+  // reorders this bill past every transaction that happened for the account in
+  // between, corrupting the running balance history from that point forward.
+  // The UI already restricts the Edit action to the last bill per account, but
+  // that check is client-side and scoped to the current page/sort/filter — this
+  // is the authoritative guard.
+  if (originalGroup.bill_no !== null) {
+    const [newerBill] = await db
+      .select({ id: entryGroups.id })
+      .from(entryGroups)
+      .where(
+        and(
+          eq(entryGroups.account_id, originalGroup.account_id),
+          eq(entryGroups.type, "PURCHASE"),
+          eq(entryGroups.is_deleted, false),
+          not(eq(entryGroups.id, input.id)),
+          sql`${entryGroups.bill_no} > ${originalGroup.bill_no}`,
+        ),
+      )
+      .limit(1);
+
+    if (newerBill) {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        "Only the most recent purchase bill for this supplier can be edited.",
+      );
+    }
   }
 
   // Reverse the original, then create a new one
