@@ -221,47 +221,7 @@ export async function createPurchase(
     totalPureQty = totalPureQty.plus(pure);
   });
 
-  // ─── Overpayment guard ─────────────────────────────────────────────────────
-  // The bank payment on this bill must never push the supplier's balance below
-  // zero — i.e. bank_amount can't exceed (opening balance + this bill's value −
-  // discounts). Mirrors the client-side guard in PurchasePage.tsx, but this is
-  // the authoritative check since tRPC can be called directly, bypassing the UI.
-  // On an edit, updatePurchase() reverses the original bill first, so the
-  // balance read here is already "as if this bill didn't exist yet".
-  const bankAmt = toDecimal(input.bank_amount || "0");
-  if (bankAmt.gt(0)) {
-    const opening = await getAggregateBalances(input.account_id);
-    const openingCash = opening.totalCash.negated(); // positive = shop owes supplier
-    const openingPure = opening.balancePure.negated();
 
-    let maxBankPayment: Decimal;
-    if (isCashMode) {
-      maxBankPayment = openingCash.plus(totalPurchaseCashVal).minus(totalDiscountCash);
-    } else {
-      const effectiveRate = totalPureQty.gt(0) && totalPurchaseCashVal.gt(0)
-        ? totalPurchaseCashVal.div(totalPureQty)
-        : rateNum;
-      const discountCashAsPure = effectiveRate.gt(0) ? discountCash.div(effectiveRate) : toDecimal(0);
-      const maxBalancePure = openingPure.plus(totalPureQty).minus(discountPureGrams).minus(discountCashAsPure);
-      maxBankPayment = maxBalancePure.times(effectiveRate);
-    }
-    // Round to paisa BEFORE comparing — bankAmt is always a clean 2dp rupee
-    // figure, but the PURE-mode branch above passes through a ÷rate step that
-    // can leave sub-paisa Decimal noise even when every input was clean.
-    // Comparing that noise against a flat ₹0.01 buffer is exactly what
-    // rejected a customer paying their own displayed balance in production
-    // (see Sales' createSale guard) — rounding first means the buffer only
-    // has to absorb genuine paisa differences, not floating noise.
-    maxBankPayment = toDecimal(maxBankPayment.toFixed(2));
-
-    if (bankAmt.gt(maxBankPayment.plus(0.01))) {
-      const cappedMax = maxBankPayment.lt(0) ? toDecimal(0) : maxBankPayment;
-      throw new AppError(
-        "VALIDATION_ERROR",
-        `Payment ₹${bankAmt.toFixed(2)} exceeds the outstanding balance of ₹${cappedMax.toFixed(2)}. Payment cannot exceed total owed.`,
-      );
-    }
-  }
 
   // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [
