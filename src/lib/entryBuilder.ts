@@ -56,6 +56,10 @@ export interface CreateEntryGroupInput {
   date: string; // ISO YYYY-MM-DD
   entryNo?: number;
   billNo?: number;
+  // Gold/cash conversion entries are bookkeeping adjustments, not real bills — they
+  // must not consume a slot in the account's bill number sequence (which would leave
+  // a confusing gap in the printed bill numbering for real sales/purchases).
+  skipBillNo?: boolean;
   billCycleId?: string;  // FK to labour_bill_cycles.id
   jobWorkCycleId?: string;  // FK to job_work_cycles.id
   ratePerGram?: string;
@@ -90,7 +94,12 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
 
     // Step 1.5 — Generate bill_no if not provided and not REVERSAL or OPENING
     let groupBillNo = input.billNo;
-    if (groupBillNo === undefined && input.type !== "REVERSAL" && input.type !== "OPENING") {
+    if (
+      groupBillNo === undefined &&
+      input.type !== "REVERSAL" &&
+      input.type !== "OPENING" &&
+      !input.skipBillNo
+    ) {
       groupBillNo = await generateBillNo(tx, input.accountId, input.type);
     }
 

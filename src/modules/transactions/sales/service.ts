@@ -221,6 +221,7 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
     date: today,
     ratePerGram: input.rate_per_gram,
     remarks: label,
+    skipBillNo: true,
     entries: [
       {
         // Reduces gold owed by the customer
@@ -278,6 +279,7 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
     date: today,
     ratePerGram: input.rate_per_gram,
     remarks: label,
+    skipBillNo: true,
     entries: [
       {
         // Reduces cash owed by the customer
@@ -340,8 +342,13 @@ export async function createSale(
     // against the customer's outstanding balance. A payment larger than what's
     // owed is now accepted and will push the balance negative.
     const ratePerGram = toDecimal(input.rate_per_gram);
+    // Sum the already-rounded per-item grossPureStr (same value used for the PURE-mode
+    // ledger entries below) rather than recomputing totalQuantity × touch fresh — doing
+    // the multiplication again here on unrounded figures produced a "Cash Sale Charge"
+    // amount that silently drifted a few paise from what the item table/Total Amount
+    // actually displays (e.g. 93996.40 instead of 94000.00 on a 9.400g bill).
     const pureValuePure = processedItems.reduce((acc, item) => {
-      return acc.plus(toDecimal(item.totalQuantityStr).mul(toDecimal(item.purity).div(100)));
+      return acc.plus(toDecimal(item.grossPureStr));
     }, toDecimal(0));
     const pureValueCash = pureValuePure.mul(ratePerGram);
 

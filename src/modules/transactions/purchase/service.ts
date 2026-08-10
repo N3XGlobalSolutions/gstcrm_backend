@@ -340,6 +340,7 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
     date: today,
     ratePerGram: input.rate_per_gram,
     remarks: label,
+    skipBillNo: true,
     entries: [
       {
         // Reduces gold owed to the supplier
@@ -402,6 +403,7 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
     date: today,
     ratePerGram: input.rate_per_gram,
     remarks: label,
+    skipBillNo: true,
     entries: [
       {
         // Reduces cash owed to the supplier
