@@ -71,6 +71,11 @@ export async function reverseEntryGroup(originalGroupId: string) {
         lotId: e.lot_id ?? undefined, // preserve lot_id so stock balances cancel out
         wastageMode: e.wastage_mode as "PERCENT" | "GRAM" | undefined,
         wastageValue: e.wastage_value ?? undefined,
+        // Pass the original wastage_quantity through explicitly for the same reason as
+        // pureQuantity above: entries whose quantity is the gross/wastage-inflated weight
+        // (job work / labour bill ornament issues) would recompute the wrong wastage amount
+        // if left to derive it from wastageMode/wastageValue against that inflated quantity.
+        wastageQuantity: e.wastage_quantity ?? undefined,
         rate: e.rate ?? undefined,
         amount: e.amount ?? undefined,
         remarks: e.remarks ?? undefined,

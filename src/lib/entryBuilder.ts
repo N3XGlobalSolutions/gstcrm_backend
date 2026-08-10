@@ -40,6 +40,10 @@ export interface EntryInput {
   pureQuantity?: string; // direct pure_quantity override (used for opening balances)
   wastageMode?: WastageMode;
   wastageValue?: string; // decimal string
+  wastageQuantity?: string; // direct wastage_quantity override — required whenever `quantity` is
+  // NOT the base weight the wastage % should be applied to (e.g. quantity is already the
+  // gross/wastage-inflated weight). Without this, recomputing from wastageMode/wastageValue
+  // would apply the wastage % on top of the already-inflated quantity.
   rate?: string; // decimal string
   amount?: string; // decimal string
   remarks?: string;
@@ -161,9 +165,11 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         pureQuantity = toQuantityString(calcPure(entry.quantity, entry.purity));
       }
 
-      // Compute wastage_quantity from mode
+      // Compute wastage_quantity from mode, or use direct override if provided
       let wastageQuantity: string | undefined;
-      if (entry.wastageMode && entry.wastageValue) {
+      if (entry.wastageQuantity !== undefined) {
+        wastageQuantity = entry.wastageQuantity;
+      } else if (entry.wastageMode && entry.wastageValue) {
         if (entry.wastageMode === "PERCENT" && entry.purity) {
           wastageQuantity = toQuantityString(
             calcWastagePercent(entry.quantity, entry.wastageValue, entry.purity),

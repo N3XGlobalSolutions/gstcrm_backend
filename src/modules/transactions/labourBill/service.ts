@@ -314,7 +314,7 @@ export async function createLabourBill(
 
   // ── 2. Ornament Issue: SHOP → Goldsmith (with wastage) ─────────────────────
   for (const item of input.ornament_issue) {
-    const { grossWeight } = calcOrnamentEntry(item);
+    const { grossWeight, wastageGm } = calcOrnamentEntry(item);
 
     if (item.lot_id) {
       const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
@@ -341,6 +341,10 @@ export async function createLabourBill(
       purity: item.purity,
       wastageMode: "PERCENT",
       wastageValue: item.wastage_percent,
+      // grossWeight already includes wastage, so it must NOT be used as the base for
+      // recomputing wastage_quantity (that would re-apply wastage% on top of an
+      // already-inflated weight). Override with the correctly-derived amount instead.
+      wastageQuantity: wastageGm,
     });
   }
 
@@ -369,7 +373,7 @@ export async function createLabourBill(
   // entryBuilder then computes:
   //   averageTouch = grossPure / physicalWeight × 100  (e.g. 98%)
   for (const item of input.ornament_receipt) {
-    const { pureQuantity: grossPure } = calcOrnamentEntry(item);
+    const { pureQuantity: grossPure, wastageGm } = calcOrnamentEntry(item);
 
     entries.push({
       fromAccountId: input.account_id,
@@ -382,6 +386,12 @@ export async function createLabourBill(
       // Override: total pure gold consumed = (physicalWeight + wastageGm) × touch%
       // Goldsmith's gold balance decreases by this full amount, not just physical × touch%.
       pureQuantity: grossPure,
+      // Record the wastage % and derived gram amount so history/reporting shows the
+      // real wastage instead of blank/zero (quantity here is already the physical
+      // base weight, so this matches what calcOrnamentEntry used to build grossPure).
+      wastageMode: "PERCENT",
+      wastageValue: item.wastage_percent,
+      wastageQuantity: wastageGm,
     });
   }
 
