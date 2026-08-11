@@ -17,6 +17,7 @@ import type {
   DeleteTxSchema,
   ConvertGoldToCashSchema,
   ConvertCashToGoldSchema,
+  SettlePurchasePaymentSchema,
 } from "./schema";
 
 export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
@@ -78,6 +79,25 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
   }));
   const batchBalances = await getBatchAggregateBalances(tuples);
 
+  // Only ONE bill in the whole Purchase History is ever editable — the single
+  // most recently created real bill (highest entry_no; conversions carry no
+  // bill_no and are excluded), across every supplier, not "each account's own
+  // latest bill". Computed globally so it's correct regardless of which page,
+  // filter, or sort the table is currently showing.
+  const [globalLastBill] = await db
+    .select({ id: entryGroups.id })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.type, "PURCHASE"),
+        eq(entryGroups.is_deleted, false),
+        isNotNull(entryGroups.bill_no),
+      ),
+    )
+    .orderBy(desc(entryGroups.entry_no))
+    .limit(1);
+  const globalLastBillId = globalLastBill?.id;
+
   const finalEnrichedData = enrichedData.map((d) => {
     const opening = batchBalances[d.group.id]!;
 
@@ -87,6 +107,8 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     // openingCash: prior net cash owed (negated — positive = shop owes supplier)
     const openingCashNum = -parseFloat(opening.totalCash.toString() || "0");
 
+    const isLastBill = d.group.id === globalLastBillId;
+
     return {
       ...d,
       openingPure: openingPureNum.toFixed(4),
@@ -94,6 +116,7 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
       isConverted: d.isConverted,
       canUndoConversion: d.canUndoConversion,
       convertedAt: d.convertedAt,
+      isLastBill,
     };
   });
 
@@ -296,6 +319,135 @@ export async function createPurchase(
   });
 
   return { group, entries };
+}
+
+/**
+ * Computes a single purchase bill's own cash value, what's been paid against it
+ * (bank/cash payments + discount), and what's still owed — independent of the
+ * account's running balance (which can carry an unrelated prior debt/credit).
+ * Mirrors the exact math the frontend uses in PurchaseHistoryTable so the two
+ * never disagree on what counts as "this bill's balance".
+ */
+async function computePurchaseBillStatus(groupId: string) {
+  const [group] = await db
+    .select()
+    .from(entryGroups)
+    .where(eq(entryGroups.id, groupId))
+    .limit(1);
+
+  if (!group || group.type !== "PURCHASE" || group.is_deleted) {
+    throw new AppError("NOT_FOUND", "Purchase not found");
+  }
+
+  const rows = await db
+    .select({ entry: entriesTable, item_type: itemsTable.type })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(eq(entriesTable.group_id, groupId));
+
+  const remarksText = group.remarks || "";
+  const isConversionEntry =
+    remarksText.startsWith("Gold to Cash Conversion") || remarksText.startsWith("Cash to Gold Conversion");
+
+  const goldEntries = rows.filter((r) => r.item_type === "GOLD" || r.item_type === "ORNAMENT");
+  const moneyEntries = rows.filter((r) => r.item_type === "MONEY");
+  const cashChargeEntries = moneyEntries.filter((r) => r.entry.remarks === "Cash Purchase Charge");
+  const isSpecial = (r: (typeof rows)[number]) => r.entry.remarks === "Cash Purchase Charge" || isConversionEntry;
+  const bankEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.to_account_id === group.account_id);
+  const discountEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.from_account_id === group.account_id);
+
+  const rate = parseFloat(group.rate_per_gram || "0");
+  const cashChargeAmount = cashChargeEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const currentCash =
+    goldEntries.reduce((s, r) => {
+      const p = parseFloat(r.entry.pure_quantity || "0");
+      const er = parseFloat(r.entry.rate || "") || rate;
+      return s + p * er;
+    }, 0) + cashChargeAmount;
+  const bankPaid = bankEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const discountCash = discountEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const paid = bankPaid + discountCash;
+  const balance = Math.round((currentCash - paid) * 100) / 100;
+
+  return {
+    group,
+    isConversionEntry,
+    currentCash: Math.round(currentCash * 100) / 100,
+    paid: Math.round(paid * 100) / 100,
+    balance,
+  };
+}
+
+/** Live payment status for a single purchase bill — powers the Pay popup. */
+export async function getPurchasePaymentStatus(input: z.infer<typeof GetByIdSchema>) {
+  const status = await computePurchaseBillStatus(input.id);
+  return {
+    currentCash: status.currentCash,
+    paid: status.paid,
+    balance: status.balance,
+    isConversionEntry: status.isConversionEntry,
+  };
+}
+
+/**
+ * Records an additional cash/bank payment against an existing purchase bill
+ * (the red "partially paid" rows in Purchase History) without editing or
+ * reversing the bill. Inserts a single MONEY entry into the bill's own
+ * entry_group — SHOP → supplier, exactly like the bank-payment entry
+ * createPurchase writes at bill creation, so it's picked up by every existing
+ * balance/history query with no special-casing needed.
+ *
+ * The amount is capped at this bill's own remaining balance — overpayment
+ * through this popup is rejected outright rather than turned into a credit.
+ */
+export async function settlePurchasePayment(input: z.infer<typeof SettlePurchasePaymentSchema>) {
+  const status = await computePurchaseBillStatus(input.id);
+
+  if (status.isConversionEntry) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "Conversion entries have no bill balance to settle.");
+  }
+
+  if (status.balance <= 0) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This bill is already fully paid.");
+  }
+
+  const amount = toDecimal(input.amount);
+  const balance = toDecimal(status.balance.toFixed(2));
+  if (amount.gt(balance.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Payment cannot exceed the balance due (₹${balance.toFixed(2)}).`,
+    );
+  }
+
+  if (input.method === "BANK" && !input.bank_details?.trim()) {
+    throw new AppError("VALIDATION_ERROR", "Select a bank account.");
+  }
+
+  const remarks = input.method === "CASH" ? "Cash" : input.bank_details!.trim();
+
+  const [inserted] = await db
+    .insert(entriesTable)
+    .values({
+      group_id: input.id,
+      from_account_id: SYSTEM_ACCOUNTS.SHOP_ID,
+      to_account_id: status.group.account_id,
+      item_id: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: amount.toFixed(2),
+      remarks,
+    })
+    .returning();
+
+  if (!inserted) throw new AppError("INTERNAL_ERROR", "Failed to record payment");
+
+  const updated = await computePurchaseBillStatus(input.id);
+
+  return {
+    entry: inserted,
+    currentCash: updated.currentCash,
+    paid: updated.paid,
+    balance: updated.balance,
+  };
 }
 
 /**

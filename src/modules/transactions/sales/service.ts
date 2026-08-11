@@ -29,6 +29,7 @@ import type {
   DeleteTxSchema,
   ConvertGoldToCashSchema,
   ConvertCashToGoldSchema,
+  SettleSalePaymentSchema,
 } from "./schema";
 
 export async function listSales(input: z.infer<typeof ListTxSchema>) {
@@ -90,6 +91,26 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
   }));
   const batchBalances = await getBatchAggregateBalances(tuples);
 
+  // Only ONE bill in the whole Sales History is ever editable — the single
+  // most recently created real bill (highest entry_no; conversions carry no
+  // bill_no and are excluded), across every customer, not "each account's own
+  // latest bill". Computed globally so it's correct regardless of which page,
+  // filter, or sort the table is currently showing — mirrors the same fix
+  // applied to Purchase's listPurchases.
+  const [globalLastBill] = await db
+    .select({ id: entryGroups.id })
+    .from(entryGroups)
+    .where(
+      and(
+        eq(entryGroups.type, "SALE"),
+        eq(entryGroups.is_deleted, false),
+        isNotNull(entryGroups.bill_no),
+      ),
+    )
+    .orderBy(desc(entryGroups.entry_no))
+    .limit(1);
+  const globalLastBillId = globalLastBill?.id;
+
   const finalEnrichedData = enrichedData.map((d) => {
     const opening = batchBalances[d.group.id]!;
 
@@ -104,6 +125,7 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
       isConverted: d.isConverted,
       canUndoConversion: d.canUndoConversion,
       convertedAt: d.convertedAt,
+      isLastBill: d.group.id === globalLastBillId,
     };
   });
 
@@ -176,6 +198,142 @@ export async function getSaleById(input: z.infer<typeof GetByIdSchema>) {
       group: purchaseGroup,
       entries: purchaseEntries
     } : null
+  };
+}
+
+/**
+ * Computes a single sale bill's own cash value, what's been received against it
+ * (bank/cash payment + discount — TDS Adjustment counts too, since it reduces
+ * the customer's payable the same direction as a payment), and what's still
+ * owed — independent of the account's running balance. Mirrors EXACTLY the
+ * math SalesHistoryTable.tsx uses for isPartiallyPaid/isFullyPaid, so this
+ * never disagrees with what the red "partially paid" row on screen shows.
+ */
+async function computeSaleBillStatus(groupId: string) {
+  const [group] = await db
+    .select()
+    .from(entryGroups)
+    .where(eq(entryGroups.id, groupId))
+    .limit(1);
+
+  if (!group || group.type !== "SALE" || group.is_deleted) {
+    throw new AppError("NOT_FOUND", "Sale not found");
+  }
+
+  const rows = await db
+    .select({ entry: entriesTable, item_type: itemsTable.type })
+    .from(entriesTable)
+    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    .where(eq(entriesTable.group_id, groupId));
+
+  const remarksText = group.remarks || "";
+  const isConversionEntry =
+    remarksText.startsWith("Gold to Cash Conversion") || remarksText.startsWith("Cash to Gold Conversion");
+
+  const itemEntries = rows.filter((r) => r.item_type === "GOLD" || r.item_type === "ORNAMENT");
+  const moneyEntries = rows.filter((r) => r.item_type === "MONEY");
+
+  const rate = parseFloat(group.rate_per_gram || "0");
+  const currentPure = itemEntries.reduce((s, r) => s + parseFloat(r.entry.pure_quantity || "0"), 0);
+  const cashChargeAmount = moneyEntries
+    .filter((r) => r.entry.remarks === "Cash Sale Charge")
+    .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const currentCash = currentPure * rate + cashChargeAmount;
+
+  const bankPaidAmount = moneyEntries
+    .filter(
+      (r) =>
+        r.entry.remarks !== "Cash Sale Charge" &&
+        r.entry.remarks !== "Discount" &&
+        !isConversionEntry &&
+        r.entry.from_account_id === group.account_id,
+    )
+    .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const discountAmount = moneyEntries
+    .filter((r) => r.entry.remarks === "Discount")
+    .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+
+  const paid = bankPaidAmount + discountAmount;
+  const balance = Math.round((currentCash - paid) * 100) / 100;
+
+  return {
+    group,
+    isConversionEntry,
+    currentCash: Math.round(currentCash * 100) / 100,
+    paid: Math.round(paid * 100) / 100,
+    balance,
+  };
+}
+
+/** Live payment status for a single sale bill — powers the Pay popup. */
+export async function getSalePaymentStatus(input: z.infer<typeof GetByIdSchema>) {
+  const status = await computeSaleBillStatus(input.id);
+  return {
+    currentCash: status.currentCash,
+    paid: status.paid,
+    balance: status.balance,
+    isConversionEntry: status.isConversionEntry,
+  };
+}
+
+/**
+ * Records an additional cash/bank payment received against an existing sale
+ * bill (the red "partially paid" rows in Sales History) without editing or
+ * reversing the bill. Inserts a single MONEY entry into the bill's own
+ * entry_group — customer → SHOP, exactly like the payment entry createSale
+ * writes at bill creation, so it's picked up by every existing balance/
+ * history query with no special-casing needed.
+ *
+ * The amount is capped at this bill's own remaining balance — overpayment
+ * through this popup is rejected outright rather than turned into a credit.
+ */
+export async function settleSalePayment(input: z.infer<typeof SettleSalePaymentSchema>) {
+  const status = await computeSaleBillStatus(input.id);
+
+  if (status.isConversionEntry) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "Conversion entries have no bill balance to settle.");
+  }
+
+  if (status.balance <= 0) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This bill is already fully paid.");
+  }
+
+  const amount = toDecimal(input.amount);
+  const balance = toDecimal(status.balance.toFixed(2));
+  if (amount.gt(balance.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Payment cannot exceed the balance due (₹${balance.toFixed(2)}).`,
+    );
+  }
+
+  if (input.method === "BANK" && !input.bank_details?.trim()) {
+    throw new AppError("VALIDATION_ERROR", "Select a bank account.");
+  }
+
+  const remarks = input.method === "CASH" ? "Cash" : input.bank_details!.trim();
+
+  const [inserted] = await db
+    .insert(entriesTable)
+    .values({
+      group_id: input.id,
+      from_account_id: status.group.account_id,
+      to_account_id: SYSTEM_ACCOUNTS.SHOP_ID,
+      item_id: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: amount.toFixed(2),
+      remarks,
+    })
+    .returning();
+
+  if (!inserted) throw new AppError("INTERNAL_ERROR", "Failed to record payment");
+
+  const updated = await computeSaleBillStatus(input.id);
+
+  return {
+    entry: inserted,
+    currentCash: updated.currentCash,
+    paid: updated.paid,
+    balance: updated.balance,
   };
 }
 

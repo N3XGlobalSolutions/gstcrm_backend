@@ -12,6 +12,7 @@ import {
   UpdateGSTConversionSchema,
   ConvertGoldToCashSchema,
   ConvertCashToGoldSchema,
+  SettleSalePaymentSchema,
 } from "./schema";
 import {
   listSales,
@@ -24,6 +25,8 @@ import {
   undoGSTConversion,
   convertGoldToCash,
   convertCashToGold,
+  getSalePaymentStatus,
+  settleSalePayment,
 } from "./service";
 
 export const salesRouter = router({
@@ -58,4 +61,6 @@ export const salesRouter = router({
     const rate = res[0]?.rate_per_gram ? Number(res[0].rate_per_gram) : 0;
     return { rate };
   }),
+  getPaymentStatus: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getSalePaymentStatus(input)),
+  settlePayment: guardedProcedure("sales", "sales", "edit").input(SettleSalePaymentSchema).mutation(async ({ input }) => settleSalePayment(input)),
 });

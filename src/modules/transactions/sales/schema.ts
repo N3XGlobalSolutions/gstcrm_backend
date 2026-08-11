@@ -90,6 +90,18 @@ export const ConvertCashToGoldSchema = z.object({
   rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
 });
 
+// ─── Settle payment against an existing bill ──────────────────────────────────
+// Records an additional cash/bank payment received against a specific sale bill
+// (a red "partially paid" row in Sales History) without editing the bill
+// itself. Validated server-side against that bill's own remaining balance —
+// see settleSalePayment in service.ts.
+export const SettleSalePaymentSchema = z.object({
+  id: z.string().uuid(),
+  amount: positiveDecimalSchema,
+  method: z.enum(['CASH', 'BANK']),
+  bank_details: z.string().optional(),
+});
+
 export const UpdateGSTConversionSchema = z.object({
   id: z.string().uuid(),
   gst_amount: nonNegativeDecimalSchema,
