@@ -27,6 +27,7 @@ import {
   convertCashToGold,
   getSalePaymentStatus,
   settleSalePayment,
+  getGSTSaleConversion,
 } from "./service";
 
 export const salesRouter = router({
@@ -63,4 +64,5 @@ export const salesRouter = router({
   }),
   getPaymentStatus: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getSalePaymentStatus(input)),
   settlePayment: guardedProcedure("sales", "sales", "edit").input(SettleSalePaymentSchema).mutation(async ({ input }) => settleSalePayment(input)),
+  getGSTConversion: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getGSTSaleConversion(input.id)),
 });

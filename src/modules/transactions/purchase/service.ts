@@ -352,9 +352,13 @@ async function computePurchaseBillStatus(groupId: string) {
   const goldEntries = rows.filter((r) => r.item_type === "GOLD" || r.item_type === "ORNAMENT");
   const moneyEntries = rows.filter((r) => r.item_type === "MONEY");
   const cashChargeEntries = moneyEntries.filter((r) => r.entry.remarks === "Cash Purchase Charge");
-  const isSpecial = (r: (typeof rows)[number]) => r.entry.remarks === "Cash Purchase Charge" || isConversionEntry;
+  // A "Discount" entry is written SHOP → supplier — the same direction as a real
+  // bank/cash payment (see createPurchase) — so it must be pulled out by remarks,
+  // not by direction (from_account_id === group.account_id would never match a
+  // real discount entry and silently classify it as a payment instead).
+  const isSpecial = (r: (typeof rows)[number]) => r.entry.remarks === "Cash Purchase Charge" || r.entry.remarks === "Discount" || isConversionEntry;
   const bankEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.to_account_id === group.account_id);
-  const discountEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.from_account_id === group.account_id);
+  const discountEntries = moneyEntries.filter((r) => r.entry.remarks === "Discount");
 
   const rate = parseFloat(group.rate_per_gram || "0");
   const cashChargeAmount = cashChargeEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
@@ -642,7 +646,7 @@ export async function deletePurchase(input: z.infer<typeof DeleteTxSchema>) {
 }
 
 export async function updateGSTPurchaseConversion(
-  input: { id: string; gst_amount: string; tds_amount: string; tcs_amount: string }
+  input: { id: string; gst_amount: string; tds_amount: string; tcs_amount: string; details?: string }
 ) {
   return db.transaction(async (tx) => {
     // 1. Fetch original group
@@ -731,6 +735,7 @@ export async function updateGSTPurchaseConversion(
         bank_paid: bankPaidAmount.toString(),
         bank_receive: "0",
         cash_paid: "0",
+        details: input.details,
       })
       .returning();
 
@@ -738,6 +743,25 @@ export async function updateGSTPurchaseConversion(
 
     return inserted;
   });
+}
+
+/**
+ * The saved GST conversion record for a purchase bill, if it has one — the
+ * printed GST bill uses this as its source of truth (via the `details` JSON
+ * snapshot) instead of recalculating the tax breakdown from the ledger, which
+ * could silently drift from what the user actually confirmed on the
+ * conversion popup (different rate-per-item handling, missing cash-charge
+ * amounts, etc).
+ */
+export async function getGSTPurchaseConversion(purchaseId: string) {
+  const [row] = await db
+    .select()
+    .from(gstPurchaseHistory)
+    .where(eq(gstPurchaseHistory.purchase_id, purchaseId))
+    .orderBy(desc(gstPurchaseHistory.created_at))
+    .limit(1);
+
+  return row ?? null;
 }
 
 export async function listGSTPurchaseHistory(input: z.infer<typeof ListTxSchema>) {

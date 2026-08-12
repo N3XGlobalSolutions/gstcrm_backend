@@ -29,6 +29,11 @@ export const gstPurchaseHistory = pgTable("gst_purchase_history", {
   bank_paid: numeric("bank_paid", { precision: 20, scale: 2 }).default("0"),
   bank_receive: numeric("bank_receive", { precision: 20, scale: 2 }).default("0"),
   cash_paid: numeric("cash_paid", { precision: 20, scale: 2 }).default("0"),
+  // Full conversion-form snapshot (customer details, HSN/tax selections, computed
+  // base/GST/CGST/SGST/TDS/TCS breakdown) as JSON text — the source of truth the
+  // printed GST bill reads from, so it always matches what was confirmed here
+  // instead of being silently recalculated (and drifting) at print time.
+  details: text("details"),
   created_at: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),

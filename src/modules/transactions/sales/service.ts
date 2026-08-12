@@ -781,7 +781,7 @@ export async function deleteSale(
 }
 
 export async function updateGSTConversion(
-  input: { id: string; gst_amount: string; tds_amount: string; tcs_amount: string }
+  input: { id: string; gst_amount: string; tds_amount: string; tcs_amount: string; details?: string }
 ) {
   return db.transaction(async (tx) => {
     // 1. Fetch original group
@@ -866,6 +866,7 @@ export async function updateGSTConversion(
         bank_paid: "0",
         bank_receive: bankPaidAmount.toString(),
         cash_paid: "0",
+        details: input.details,
       })
       .returning();
 
@@ -873,6 +874,22 @@ export async function updateGSTConversion(
 
     return inserted;
   });
+}
+
+/**
+ * The saved GST conversion record for a sale bill, if it has one — the
+ * printed GST bill uses this as its source of truth (via the `details` JSON
+ * snapshot) instead of recalculating the tax breakdown from the ledger.
+ */
+export async function getGSTSaleConversion(saleId: string) {
+  const [row] = await db
+    .select()
+    .from(gstSalesHistory)
+    .where(eq(gstSalesHistory.sale_id, saleId))
+    .orderBy(desc(gstSalesHistory.created_at))
+    .limit(1);
+
+  return row ?? null;
 }
 
 export async function listGSTHistory(input: z.infer<typeof ListTxSchema>) {

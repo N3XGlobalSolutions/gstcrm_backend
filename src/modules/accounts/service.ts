@@ -72,6 +72,9 @@ export async function createAccount(
       phone: input.phone ?? null,
       email: input.email ?? null,
       website: input.website ?? null,
+      bank_name: input.bank_name ?? null,
+      bank_account_no: input.bank_account_no ?? null,
+      ifsc_code: input.ifsc_code ?? null,
       opening_pure_balance: input.opening_pure_balance,
       opening_cash_balance: input.opening_cash_balance,
     });
@@ -171,6 +174,9 @@ export async function updateAccountById(
     phone: input.phone ?? null,
     email: input.email ?? null,
     website: input.website ?? null,
+    bank_name: input.bank_name ?? null,
+    bank_account_no: input.bank_account_no ?? null,
+    ifsc_code: input.ifsc_code ?? null,
   });
 
   if (current.type === "CUSTOMER") {

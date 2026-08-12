@@ -107,4 +107,8 @@ export const UpdateGSTConversionSchema = z.object({
   gst_amount: nonNegativeDecimalSchema,
   tds_amount: nonNegativeDecimalSchema,
   tcs_amount: nonNegativeDecimalSchema,
+  // Full conversion-form snapshot (JSON string) — the printed GST bill reads this
+  // back as its source of truth instead of recalculating from the ledger, so it
+  // always matches exactly what was confirmed on the conversion popup.
+  details: z.string().optional(),
 });

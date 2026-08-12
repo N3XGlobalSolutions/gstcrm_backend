@@ -48,6 +48,9 @@ export const accounts = pgTable("accounts", {
   phone: varchar("phone", { length: 15 }),
   email: varchar("email", { length: 200 }),
   website: varchar("website", { length: 200 }),
+  bank_name: varchar("bank_name", { length: 200 }),
+  bank_account_no: varchar("bank_account_no", { length: 30 }),
+  ifsc_code: varchar("ifsc_code", { length: 15 }),
   // Stored for reference — NOT the source of truth for balance (use getBalance)
   opening_pure_balance: numeric("opening_pure_balance", {
     precision: 20,
