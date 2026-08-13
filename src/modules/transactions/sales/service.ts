@@ -203,11 +203,12 @@ export async function getSaleById(input: z.infer<typeof GetByIdSchema>) {
 
 /**
  * Computes a single sale bill's own cash value, what's been received against it
- * (bank/cash payment + discount — TDS Adjustment counts too, since it reduces
- * the customer's payable the same direction as a payment), and what's still
- * owed — independent of the account's running balance. Mirrors EXACTLY the
- * math SalesHistoryTable.tsx uses for isPartiallyPaid/isFullyPaid, so this
- * never disagrees with what the red "partially paid" row on screen shows.
+ * (bank/cash payment + discount + TDS — TDS reduces the customer's payable the
+ * same way a discount does, TCS increases it the same way a Cash Sale Charge
+ * does), and what's still owed — independent of the account's running balance.
+ * Mirrors EXACTLY the math SalesHistoryTable.tsx uses for isPartiallyPaid/
+ * isFullyPaid, so this never disagrees with what the red "partially paid" row
+ * on screen shows.
  */
 async function computeSaleBillStatus(groupId: string) {
   const [group] = await db
@@ -245,6 +246,8 @@ async function computeSaleBillStatus(groupId: string) {
       (r) =>
         r.entry.remarks !== "Cash Sale Charge" &&
         r.entry.remarks !== "Discount" &&
+        r.entry.remarks !== "TDS Adjustment" &&
+        r.entry.remarks !== "TCS Adjustment" &&
         !isConversionEntry &&
         r.entry.from_account_id === group.account_id,
     )
@@ -252,8 +255,14 @@ async function computeSaleBillStatus(groupId: string) {
   const discountAmount = moneyEntries
     .filter((r) => r.entry.remarks === "Discount")
     .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const tdsCash = moneyEntries
+    .filter((r) => r.entry.remarks === "TDS Adjustment")
+    .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const tcsCash = moneyEntries
+    .filter((r) => r.entry.remarks === "TCS Adjustment")
+    .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
 
-  const paid = bankPaidAmount + discountAmount;
+  const paid = bankPaidAmount + discountAmount + tdsCash - tcsCash;
   const balance = Math.round((currentCash - paid) * 100) / 100;
 
   return {

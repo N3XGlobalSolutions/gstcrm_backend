@@ -190,7 +190,16 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
   // edit form can rehydrate each field independently — without this the form cannot see
   // the discount, sends back "0", and the reverse-and-recreate update silently erases it.
   const discountEntries = moneyEntries.filter((e) => e.entry.remarks === "Discount");
-  const paymentEntries = moneyEntries.filter((e) => e.entry.remarks !== "Discount" && e.entry.remarks !== "Cash Purchase Charge");
+  // TDS/TCS Adjustment entries are also structurally identical to a bank
+  // payment (SHOP → supplier) but aren't real payments — exclude them the
+  // same way Discount and Cash Purchase Charge are excluded, so the printed
+  // Estimation's Cash Paid/Bank Paid split isn't inflated by tax adjustments.
+  const paymentEntries = moneyEntries.filter((e) =>
+    e.entry.remarks !== "Discount" &&
+    e.entry.remarks !== "Cash Purchase Charge" &&
+    e.entry.remarks !== "TDS Adjustment" &&
+    e.entry.remarks !== "TCS Adjustment"
+  );
 
   // Opening Cash & Pure: negated for supplier (positive = shop owes supplier)
   const openingPureBalance = opening.balancePure.negated();
@@ -305,6 +314,32 @@ export async function createPurchase(
           },
         ]
       : []),
+    // TDS — on Purchase, TDS ADDS to what the shop owes the supplier (by
+    // request). Supplier → SHOP: same direction/effect as a Cash Purchase Charge.
+    ...(input.tds_enabled && toDecimal(input.tds_amount ?? '0').gt(0)
+      ? [
+          {
+            fromAccountId: input.account_id,
+            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+            quantity: toDecimal(input.tds_amount!).toFixed(2),
+            remarks: 'TDS Adjustment',
+          },
+        ]
+      : []),
+    // TCS — on Purchase, TCS SUBTRACTS from what the shop owes the supplier
+    // (by request). SHOP → supplier: same direction/effect as a discount.
+    ...(input.tcs_enabled && toDecimal(input.tcs_amount ?? '0').gt(0)
+      ? [
+          {
+            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            toAccountId: input.account_id,
+            itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+            quantity: toDecimal(input.tcs_amount!).toFixed(2),
+            remarks: 'TCS Adjustment',
+          },
+        ]
+      : []),
   ];
 
   const { group, entries } = await createEntryGroup({
@@ -356,9 +391,20 @@ async function computePurchaseBillStatus(groupId: string) {
   // bank/cash payment (see createPurchase) — so it must be pulled out by remarks,
   // not by direction (from_account_id === group.account_id would never match a
   // real discount entry and silently classify it as a payment instead).
-  const isSpecial = (r: (typeof rows)[number]) => r.entry.remarks === "Cash Purchase Charge" || r.entry.remarks === "Discount" || isConversionEntry;
+  // On Purchase, TDS ADDS to what's owed (supplier → SHOP, same direction/effect
+  // as a Cash Purchase Charge) and TCS SUBTRACTS from it (SHOP → supplier, same
+  // direction/effect as a discount) — by request, the reverse of the usual tax
+  // convention. Both need pulling out by remarks for the same reason Discount does.
+  const isSpecial = (r: (typeof rows)[number]) =>
+    r.entry.remarks === "Cash Purchase Charge" ||
+    r.entry.remarks === "Discount" ||
+    r.entry.remarks === "TDS Adjustment" ||
+    r.entry.remarks === "TCS Adjustment" ||
+    isConversionEntry;
   const bankEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.to_account_id === group.account_id);
   const discountEntries = moneyEntries.filter((r) => r.entry.remarks === "Discount");
+  const tdsEntries = moneyEntries.filter((r) => r.entry.remarks === "TDS Adjustment");
+  const tcsEntries = moneyEntries.filter((r) => r.entry.remarks === "TCS Adjustment");
 
   const rate = parseFloat(group.rate_per_gram || "0");
   const cashChargeAmount = cashChargeEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
@@ -370,7 +416,9 @@ async function computePurchaseBillStatus(groupId: string) {
     }, 0) + cashChargeAmount;
   const bankPaid = bankEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
   const discountCash = discountEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
-  const paid = bankPaid + discountCash;
+  const tdsCash = tdsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const tcsCash = tcsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  const paid = bankPaid + discountCash + tcsCash - tdsCash;
   const balance = Math.round((currentCash - paid) * 100) / 100;
 
   return {

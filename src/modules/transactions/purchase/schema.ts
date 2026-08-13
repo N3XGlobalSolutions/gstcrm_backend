@@ -42,6 +42,12 @@ export const CreatePurchaseSchema = z.object({
   discount: nonNegativeDecimalSchema.optional(),
   discount_pure: nonNegativeDecimalSchema.optional(),
   balance_mode: z.enum(['PURE', 'CASH']).default('PURE'),
+  // TDS/TCS — tax withholding adjustments that affect the running balance,
+  // same as Sales.
+  tds_enabled: z.boolean().default(false),
+  tds_amount: nonNegativeDecimalSchema.default('0'),
+  tcs_enabled: z.boolean().default(false),
+  tcs_amount: nonNegativeDecimalSchema.default('0'),
 });
 
 export const UpdatePurchaseSchema = CreatePurchaseSchema.extend({
