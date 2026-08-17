@@ -51,6 +51,10 @@ export const accounts = pgTable("accounts", {
   bank_name: varchar("bank_name", { length: 200 }),
   bank_account_no: varchar("bank_account_no", { length: 30 }),
   ifsc_code: varchar("ifsc_code", { length: 15 }),
+  // Per-account TDS/TCS % override — used on Purchase/Sales/Labour Bill bills for
+  // this account instead of the company-wide default when set (see settings.company).
+  default_tds_percent: numeric("default_tds_percent", { precision: 5, scale: 3 }),
+  default_tcs_percent: numeric("default_tcs_percent", { precision: 5, scale: 3 }),
   // Stored for reference — NOT the source of truth for balance (use getBalance)
   opening_pure_balance: numeric("opening_pure_balance", {
     precision: 20,

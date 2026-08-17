@@ -75,6 +75,8 @@ export async function createAccount(
       bank_name: input.bank_name ?? null,
       bank_account_no: input.bank_account_no ?? null,
       ifsc_code: input.ifsc_code ?? null,
+      default_tds_percent: input.default_tds_percent ?? null,
+      default_tcs_percent: input.default_tcs_percent ?? null,
       opening_pure_balance: input.opening_pure_balance,
       opening_cash_balance: input.opening_cash_balance,
     });
@@ -177,6 +179,8 @@ export async function updateAccountById(
     bank_name: input.bank_name ?? null,
     bank_account_no: input.bank_account_no ?? null,
     ifsc_code: input.ifsc_code ?? null,
+    default_tds_percent: input.default_tds_percent ?? null,
+    default_tcs_percent: input.default_tcs_percent ?? null,
   });
 
   if (current.type === "CUSTOMER") {

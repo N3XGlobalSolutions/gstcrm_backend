@@ -34,6 +34,8 @@ export const CreateAccountSchema = z.object({
   bank_name: z.string().max(200).optional().nullable(),
   bank_account_no: z.string().max(30).optional().nullable(),
   ifsc_code: z.string().max(15).optional().nullable(),
+  default_tds_percent: z.string().optional().nullable(),
+  default_tcs_percent: z.string().optional().nullable(),
   opening_pure_balance: z.string().default("0"), // decimal string
   opening_cash_balance: z.string().default("0"), // decimal string
 });
@@ -58,6 +60,8 @@ export const UpdateAccountSchema = z.object({
   bank_name: z.string().max(200).optional().nullable(),
   bank_account_no: z.string().max(30).optional().nullable(),
   ifsc_code: z.string().max(15).optional().nullable(),
+  default_tds_percent: z.string().optional().nullable(),
+  default_tcs_percent: z.string().optional().nullable(),
   updated_at: z.string(), // ISO timestamp — optimistic lock
 });
 
