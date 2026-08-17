@@ -21,14 +21,22 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
 
   const [total_sales, total_purchase, total_stock_sales, total_job_work, total_labour_bill, total_expense] =
     await Promise.all([
-      // Total sales (monetary value in ₹ of items sold)
+      // Total sales (monetary value in ₹ of items sold). Gold-mode items value at
+      // pure × rate; Cash-mode items carry pure_quantity = 0 with their cash value
+      // recorded separately as a "Cash Sale Charge" MONEY entry (see createSale) —
+      // both must be summed or cash-mode bills silently drop out of this total.
       db.execute<{ total: string }>(
-        sql`SELECT COALESCE(SUM(e.pure_quantity * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS total
+        sql`SELECT COALESCE(SUM(
+              CASE
+                WHEN e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID} THEN e.pure_quantity * COALESCE(e.rate, g.rate_per_gram, 0)
+                WHEN e.item_id = ${SYSTEM_ITEMS.RUPEE_ITEM_ID} AND e.remarks = 'Cash Sale Charge' THEN e.quantity
+                ELSE 0
+              END
+            ), 0)::text AS total
             FROM ${entries} e
             JOIN ${entryGroups} g ON e.group_id = g.id
             WHERE g.type = 'SALE' AND g.is_deleted = false
               AND e.from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
-              AND e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
       // Total purchase (gold received)
@@ -41,13 +49,16 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
               AND e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
-      // Total stock sales (items dispatched)
+      // Total stock sales (gold/ornament grams dispatched). Must exclude RUPEE_ITEM_ID —
+      // without this filter, a Cash-mode sale's "Cash Sale Charge" MONEY entry (whose
+      // quantity is a rupee amount, not grams) gets summed straight into this gram total.
       db.execute<{ total: string }>(
         sql`SELECT COALESCE(SUM(e.quantity), 0)::text AS total
             FROM ${entries} e
             JOIN ${entryGroups} g ON e.group_id = g.id
             WHERE g.type = 'SALE' AND g.is_deleted = false
               AND e.from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
+              AND e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
       // Total job work count
