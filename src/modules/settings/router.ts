@@ -209,6 +209,8 @@ const companyRouter = router({
       placeOfSupply: z.string().optional(),
       businessType: z.string().optional(),
       bank_details: z.string().optional(),
+      defaultTdsPercent: z.string().optional(),
+      defaultTcsPercent: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
       // Keep old fields synced for compatibility

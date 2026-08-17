@@ -314,26 +314,26 @@ export async function createPurchase(
           },
         ]
       : []),
-    // TDS — on Purchase, TDS ADDS to what the shop owes the supplier (by
-    // request). Supplier → SHOP: same direction/effect as a Cash Purchase Charge.
+    // TDS — subtracts from what the shop owes the supplier (SHOP → supplier:
+    // same direction/effect as a discount).
     ...(input.tds_enabled && toDecimal(input.tds_amount ?? '0').gt(0)
       ? [
           {
-            fromAccountId: input.account_id,
-            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+            toAccountId: input.account_id,
             itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
             quantity: toDecimal(input.tds_amount!).toFixed(2),
             remarks: 'TDS Adjustment',
           },
         ]
       : []),
-    // TCS — on Purchase, TCS SUBTRACTS from what the shop owes the supplier
-    // (by request). SHOP → supplier: same direction/effect as a discount.
+    // TCS — adds to what the shop owes the supplier (supplier → SHOP: same
+    // direction/effect as a Cash Purchase Charge).
     ...(input.tcs_enabled && toDecimal(input.tcs_amount ?? '0').gt(0)
       ? [
           {
-            fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-            toAccountId: input.account_id,
+            fromAccountId: input.account_id,
+            toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
             itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
             quantity: toDecimal(input.tcs_amount!).toFixed(2),
             remarks: 'TCS Adjustment',
@@ -391,10 +391,10 @@ async function computePurchaseBillStatus(groupId: string) {
   // bank/cash payment (see createPurchase) — so it must be pulled out by remarks,
   // not by direction (from_account_id === group.account_id would never match a
   // real discount entry and silently classify it as a payment instead).
-  // On Purchase, TDS ADDS to what's owed (supplier → SHOP, same direction/effect
-  // as a Cash Purchase Charge) and TCS SUBTRACTS from it (SHOP → supplier, same
-  // direction/effect as a discount) — by request, the reverse of the usual tax
-  // convention. Both need pulling out by remarks for the same reason Discount does.
+  // TDS SUBTRACTS from what's owed (SHOP → supplier, same direction/effect as a
+  // discount) and TCS ADDS to it (supplier → SHOP, same direction/effect as a
+  // Cash Purchase Charge). Both need pulling out by remarks for the same reason
+  // Discount does.
   const isSpecial = (r: (typeof rows)[number]) =>
     r.entry.remarks === "Cash Purchase Charge" ||
     r.entry.remarks === "Discount" ||
@@ -418,7 +418,7 @@ async function computePurchaseBillStatus(groupId: string) {
   const discountCash = discountEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
   const tdsCash = tdsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
   const tcsCash = tcsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
-  const paid = bankPaid + discountCash + tcsCash - tdsCash;
+  const paid = bankPaid + discountCash + tdsCash - tcsCash;
   const balance = Math.round((currentCash - paid) * 100) / 100;
 
   return {

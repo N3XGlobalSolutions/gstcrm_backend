@@ -1,0 +1,2 @@
+ALTER TABLE "company_details" ADD COLUMN "default_tds_percent" numeric(5, 3) DEFAULT '0.01';--> statement-breakpoint
+ALTER TABLE "company_details" ADD COLUMN "default_tcs_percent" numeric(5, 3) DEFAULT '0.01';

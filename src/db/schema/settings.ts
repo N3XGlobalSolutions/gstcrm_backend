@@ -89,6 +89,10 @@ export const companyDetails = pgTable("company_details", {
   placeOfSupply: varchar("place_of_supply", { length: 100 }),
   businessType: varchar("business_type", { length: 100 }),
 
+  // Default TDS/TCS % pre-filled on Purchase and Sales bills when the tax is toggled on.
+  defaultTdsPercent: numeric("default_tds_percent", { precision: 5, scale: 3 }).default("0.01"),
+  defaultTcsPercent: numeric("default_tcs_percent", { precision: 5, scale: 3 }).default("0.01"),
+
   updated_at: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
