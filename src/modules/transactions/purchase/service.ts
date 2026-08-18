@@ -241,13 +241,18 @@ export async function createPurchase(
 
   const isCashMode = input.balance_mode === "CASH";
 
-  // Calculate total cash value and total pure weight for items
+  // Calculate total cash value and total pure weight for items.
+  // Round each item's pure to 3dp (toQuantityString) before multiplying by rate —
+  // same value PURE-mode entries below get written with (via entryBuilder's
+  // calcPure/toQuantityString). Multiplying on the unrounded figure here produced a
+  // "Cash Purchase Charge" that drifted a few rupees from what the item table/Total
+  // Amount actually displays (mirrors the identical fix in sales/service.ts).
   let totalPurchaseCashVal = toDecimal(0);
   let totalPureQty = toDecimal(0);
   allItems.forEach((item) => {
     const qty = toDecimal(item.quantity);
     const pur = toDecimal(item.purity);
-    const pure = qty.times(pur).div(100);
+    const pure = toDecimal(toQuantityString(qty.times(pur).div(100)));
     const r = toDecimal(item.rate ?? input.rate_per_gram ?? '0');
     totalPurchaseCashVal = totalPurchaseCashVal.plus(pure.times(r));
     totalPureQty = totalPureQty.plus(pure);

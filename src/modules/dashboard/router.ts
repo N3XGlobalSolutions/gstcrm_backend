@@ -71,12 +71,16 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
         and(eq(entryGroups.type, "JOB_WORK"), eq(entryGroups.is_deleted, false),
             gte(entryGroups.date, from), lte(entryGroups.date, to)),
       ),
-      // Total labour bill (pure)
+      // Total labour bill — incoming gold only (Gold/Ornament Receipt, goldsmith →
+      // SHOP). Excludes Gold Issue (SHOP → goldsmith) so issuing raw material out
+      // doesn't inflate this figure; only finished work actually received back counts.
       db.execute<{ total: string }>(
         sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
             FROM ${entries} e
             JOIN ${entryGroups} g ON e.group_id = g.id
             WHERE g.type = 'LABOUR_BILL' AND g.is_deleted = false
+              AND e.to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
+              AND e.item_id != ${SYSTEM_ITEMS.RUPEE_ITEM_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
       // Total expense
