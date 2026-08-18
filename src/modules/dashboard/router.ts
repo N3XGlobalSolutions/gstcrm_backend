@@ -39,9 +39,14 @@ async function getMetrics(input: z.infer<typeof MetricsSchema>) {
               AND e.from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID}
               AND g.date BETWEEN ${from} AND ${to}`,
       ),
-      // Total purchase (gold received)
+      // Total purchase (gold received, in pure grams). Computed as quantity × purity
+      // directly rather than SUM(pure_quantity) — a Cash-mode purchase (see
+      // createPurchase) deliberately zeroes pure_quantity on its item entries (the
+      // gold balance isn't affected, only cash is), but the physical gold weight and
+      // purity are still recorded, so quantity × purity still gives the true pure
+      // content received regardless of which mode the bill was entered in.
       db.execute<{ total: string }>(
-        sql`SELECT COALESCE(SUM(e.pure_quantity), 0)::text AS total
+        sql`SELECT COALESCE(SUM(e.quantity * COALESCE(e.purity, 0) / 100), 0)::text AS total
             FROM ${entries} e
             JOIN ${entryGroups} g ON e.group_id = g.id
             WHERE g.type = 'PURCHASE' AND g.is_deleted = false

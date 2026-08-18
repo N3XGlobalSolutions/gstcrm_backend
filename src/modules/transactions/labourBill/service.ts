@@ -24,6 +24,8 @@ import {
   type CreateCycleSchema,
   type ListCyclesSchema,
   type GetCycleDetailSchema,
+  type ConvertGoldToCashSchema,
+  type ConvertCashToGoldSchema,
 } from "./schema";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
@@ -428,14 +430,26 @@ export async function createLabourBill(
     });
   }
 
-  // ── 6.6. TDS ───────────────────────────────────────────────────────────────
-  if (input.tds && toDecimal(input.tds).gt(0)) {
+  // ── 6.6. TDS — subtracts from what the goldsmith owes (SHOP → goldsmith,
+  // same direction/effect as a discount). ──────────────────────────────────
+  if (input.tds_enabled && input.tds_amount && toDecimal(input.tds_amount).gt(0)) {
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       toAccountId: input.account_id,
       itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-      quantity: input.tds,
-      remarks: "TDS",
+      quantity: input.tds_amount,
+      remarks: "TDS Adjustment",
+    });
+  }
+
+  // ── 6.7. TCS — adds to what the goldsmith owes (goldsmith → SHOP). ───────
+  if (input.tcs_enabled && input.tcs_amount && toDecimal(input.tcs_amount).gt(0)) {
+    entries.push({
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.tcs_amount,
+      remarks: "TCS Adjustment",
     });
   }
 
@@ -468,7 +482,8 @@ export async function createLabourBill(
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     billCycleId: input.bill_cycle_id,
-    tdsAmount: input.tds,
+    tdsAmount: input.tds_amount,
+    tcsAmount: input.tcs_amount,
     entries,
   });
 
@@ -506,4 +521,124 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
 
 export async function deleteLabourBill(input: z.infer<typeof DeleteTxSchema>) {
   throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for labour bills");
+}
+
+// ─── convertGoldToCash ────────────────────────────────────────────────────────
+// Converts part of a goldsmith's carried-forward OPENING gold balance into a
+// cash debt, independent of any bill currently being drafted — the Labour Bill
+// equivalent of Purchase's convertGoldToCash. Same RUPEE_ITEM_ID + SHOP_ID
+// trick (no real gold moves, only the balance is reclassified).
+//
+// Sign convention (verified against getAggregateBalances directly — a Gold
+// Issue is SHOP → goldsmith, an inflow for the goldsmith's own account, so
+// totalPure is already positive when the goldsmith owes gold; no negation).
+// openingPureNum shown on the form = totalPure, positive = goldsmith owes
+// shop. Entry 1 (goldsmith → SHOP, pureQuantity override) raises the
+// goldsmith's outflow, which LOWERS totalPure — reducing gold owed. Entry 2
+// (SHOP → goldsmith, cash quantity) raises the goldsmith's inflow, which
+// raises totalCash — raising cash owed.
+export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
+  const goldGrams = toDecimal(input.gold_grams);
+  const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingPure = toDecimal(opening.totalPure.toFixed(3)); // positive = goldsmith owes shop
+
+  if (openingPure.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This goldsmith has no outstanding gold balance to convert.");
+  }
+  if (goldGrams.gt(openingPure.plus(0.001))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ${goldGrams.toFixed(3)}g — only ${openingPure.toFixed(3)}g of gold is outstanding for this goldsmith.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Gold to Cash Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries } = await createEntryGroup({
+    type: "LABOUR_BILL",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    skipBillNo: true,
+    entries: [
+      {
+        // Reduces gold owed by the goldsmith
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+      {
+        // Raises cash owed by the goldsmith
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
+}
+
+// ─── convertCashToGold ────────────────────────────────────────────────────────
+// The opposite of convertGoldToCash: converts part of a goldsmith's outstanding
+// cash debt into a pure-gold debt, at an agreed rate. Entries simply reversed.
+export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
+  const cashAmount = toDecimal(input.cash_amount);
+  const rate = toDecimal(input.rate_per_gram);
+  const goldGrams = cashAmount.div(rate);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingCash = toDecimal(opening.totalCash.toFixed(2)); // positive = goldsmith owes shop
+
+  if (openingCash.lte(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This goldsmith has no outstanding cash balance to convert.");
+  }
+  if (cashAmount.gt(openingCash.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${openingCash.toFixed(2)} of cash is outstanding for this goldsmith.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Cash to Gold Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+
+  const { group, entries } = await createEntryGroup({
+    type: "LABOUR_BILL",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    skipBillNo: true,
+    entries: [
+      {
+        // Reduces cash owed by the goldsmith
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+      {
+        // Raises gold owed by the goldsmith
+        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
 }

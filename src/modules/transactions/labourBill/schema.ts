@@ -102,7 +102,15 @@ export const CreateLabourBillSchema = z.object({
   bank_receive:         positiveDecimalSchema.optional(), // Goldsmith pays SHOP (cash in) — must be > 0 if provided
   bank_receive_details: z.string().optional(),
   discount:             positiveDecimalSchema.optional(), // must be > 0 if provided
-  tds:                  positiveDecimalSchema.optional(), // must be > 0 if provided
+
+  // TDS/TCS — same convention as Purchase/Sales: TDS subtracts from what the
+  // goldsmith owes, TCS adds to it. Amount is precomputed on the frontend
+  // (percent × taxable base, net of the 3% GST portion) and sent as a fixed
+  // rupee figure, same pattern as Purchase/Sales.
+  tds_enabled: z.boolean().optional(),
+  tds_amount:  positiveDecimalSchema.optional(),
+  tcs_enabled: z.boolean().optional(),
+  tcs_amount:  positiveDecimalSchema.optional(),
 
   // Partial gold-to-cash conversions (each converts slip pure into cash debt)
   cash_conversions: z.array(CashConversionSchema).default([]),
@@ -110,6 +118,22 @@ export const CreateLabourBillSchema = z.object({
 
 export const UpdateLabourBillSchema = CreateLabourBillSchema.extend({
   id: z.string().uuid(),
+});
+
+// ─── Gold-to-cash / cash-to-gold conversion (opening balance) ─────────────────
+// Converts part of a goldsmith's carried-forward opening balance — independent
+// of any bill currently being drafted, same as Purchase's account-level convert.
+
+export const ConvertGoldToCashSchema = z.object({
+  account_id: z.string().uuid(),
+  gold_grams: positiveDecimalSchema,      // pure gold grams being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
+});
+
+export const ConvertCashToGoldSchema = z.object({
+  account_id: z.string().uuid(),
+  cash_amount: positiveDecimalSchema,     // cash being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
 });
 
 // ─── Re-export types ───────────────────────────────────────────────────────────
