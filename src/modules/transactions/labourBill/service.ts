@@ -534,29 +534,33 @@ export async function deleteLabourBill(input: z.infer<typeof DeleteTxSchema>) {
 // Issue is SHOP → goldsmith, an inflow for the goldsmith's own account, so
 // totalPure is already positive when the goldsmith owes gold; no negation).
 // openingPureNum shown on the form = totalPure, positive = goldsmith owes
-// shop. Entry 1 (goldsmith → SHOP, pureQuantity override) raises the
-// goldsmith's outflow, which LOWERS totalPure — reducing gold owed. Entry 2
-// (SHOP → goldsmith, cash quantity) raises the goldsmith's inflow, which
-// raises totalCash — raising cash owed.
+// shop, negative = shop owes goldsmith. Works in EITHER direction: a positive
+// gold balance converts to a positive cash balance (goldsmith owes shop cash
+// instead of gold); a negative gold balance converts to a negative cash
+// balance (shop owes goldsmith cash instead of gold) — both entries below
+// simply flip direction when the balance is negative, so the conversion always
+// shrinks the gold magnitude and grows the cash magnitude in the same sign.
 export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
   const goldGrams = toDecimal(input.gold_grams);
   const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingPure = toDecimal(opening.totalPure.toFixed(3)); // positive = goldsmith owes shop
+  const openingPure = toDecimal(opening.totalPure.toFixed(3)); // positive = goldsmith owes shop, negative = shop owes goldsmith
 
-  if (openingPure.lte(0)) {
+  if (openingPure.eq(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This goldsmith has no outstanding gold balance to convert.");
   }
-  if (goldGrams.gt(openingPure.plus(0.001))) {
+  const availablePure = openingPure.abs();
+  if (goldGrams.gt(availablePure.plus(0.001))) {
     throw new AppError(
       "VALIDATION_ERROR",
-      `Cannot convert ${goldGrams.toFixed(3)}g — only ${openingPure.toFixed(3)}g of gold is outstanding for this goldsmith.`,
+      `Cannot convert ${goldGrams.toFixed(3)}g — only ${availablePure.toFixed(3)}g of gold is outstanding for this goldsmith.`,
     );
   }
 
   const today = new Date().toISOString().split("T")[0]!;
   const label = `Gold to Cash Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+  const isPositive = openingPure.gt(0);
 
   const { group, entries } = await createEntryGroup({
     type: "LABOUR_BILL",
@@ -567,18 +571,18 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
     skipBillNo: true,
     entries: [
       {
-        // Reduces gold owed by the goldsmith
-        fromAccountId: input.account_id,
-        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        // Shrinks the gold magnitude toward zero (whichever side owes it)
+        fromAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
         itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
         quantity: "0",
         pureQuantity: goldGrams.toFixed(3),
         remarks: label,
       },
       {
-        // Raises cash owed by the goldsmith
-        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-        toAccountId: input.account_id,
+        // Grows a cash debt of matching magnitude on the same side
+        fromAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        toAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
         itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
         quantity: cashAmount.toFixed(2),
         remarks: label,
@@ -591,27 +595,30 @@ export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashS
 
 // ─── convertCashToGold ────────────────────────────────────────────────────────
 // The opposite of convertGoldToCash: converts part of a goldsmith's outstanding
-// cash debt into a pure-gold debt, at an agreed rate. Entries simply reversed.
+// cash debt into a pure-gold debt, at an agreed rate. Works in either sign
+// direction — see convertGoldToCash's comment for the full explanation.
 export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
   const cashAmount = toDecimal(input.cash_amount);
   const rate = toDecimal(input.rate_per_gram);
   const goldGrams = cashAmount.div(rate);
 
   const opening = await getAggregateBalances(input.account_id);
-  const openingCash = toDecimal(opening.totalCash.toFixed(2)); // positive = goldsmith owes shop
+  const openingCash = toDecimal(opening.totalCash.toFixed(2)); // positive = goldsmith owes shop, negative = shop owes goldsmith
 
-  if (openingCash.lte(0)) {
+  if (openingCash.eq(0)) {
     throw new AppError("BUSINESS_RULE_VIOLATION", "This goldsmith has no outstanding cash balance to convert.");
   }
-  if (cashAmount.gt(openingCash.plus(0.01))) {
+  const availableCash = openingCash.abs();
+  if (cashAmount.gt(availableCash.plus(0.01))) {
     throw new AppError(
       "VALIDATION_ERROR",
-      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${openingCash.toFixed(2)} of cash is outstanding for this goldsmith.`,
+      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${availableCash.toFixed(2)} of cash is outstanding for this goldsmith.`,
     );
   }
 
   const today = new Date().toISOString().split("T")[0]!;
   const label = `Cash to Gold Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+  const isPositive = openingCash.gt(0);
 
   const { group, entries } = await createEntryGroup({
     type: "LABOUR_BILL",
@@ -622,17 +629,17 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
     skipBillNo: true,
     entries: [
       {
-        // Reduces cash owed by the goldsmith
-        fromAccountId: input.account_id,
-        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        // Shrinks the cash magnitude toward zero (whichever side owes it)
+        fromAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
         itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
         quantity: cashAmount.toFixed(2),
         remarks: label,
       },
       {
-        // Raises gold owed by the goldsmith
-        fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-        toAccountId: input.account_id,
+        // Grows a gold debt of matching magnitude on the same side
+        fromAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        toAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
         itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
         quantity: "0",
         pureQuantity: goldGrams.toFixed(3),
