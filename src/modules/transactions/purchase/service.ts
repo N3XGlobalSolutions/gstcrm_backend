@@ -198,7 +198,8 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
     e.entry.remarks !== "Discount" &&
     e.entry.remarks !== "Cash Purchase Charge" &&
     e.entry.remarks !== "TDS Adjustment" &&
-    e.entry.remarks !== "TCS Adjustment"
+    e.entry.remarks !== "TCS Adjustment" &&
+    e.entry.remarks !== "Round Off"
   );
 
   // Opening Cash & Pure: negated for supplier (positive = shop owes supplier)
@@ -345,6 +346,48 @@ export async function createPurchase(
           },
         ]
       : []),
+    // Round Off — settles the bill to a whole rupee IN THE LEDGER, not just on the
+    // printed estimation. Previously the estimation computed this delta at print
+    // time and only adjusted the displayed Closing Balance, so the sub-rupee
+    // remainder stayed in the supplier's real balance and compounded bill after
+    // bill (e.g. -0.16 carried into the next bill, which then closed at -0.48
+    // while printing -0.16). Posting it here keeps the printed figures and the
+    // ledger identical, and stops the paise accumulating.
+    //
+    // CASH mode only: a PURE-mode bill's value never touches the cash ledger, so
+    // there is no cash remainder to round there.
+    ...(() => {
+      if (!isCashMode) return [];
+      const tds = input.tds_enabled ? toDecimal(input.tds_amount ?? '0') : toDecimal('0');
+      const tcs = input.tcs_enabled ? toDecimal(input.tcs_amount ?? '0') : toDecimal('0');
+      const billBalance = totalPurchaseCashVal
+        .minus(toDecimal(input.bank_amount || '0'))
+        .minus(totalDiscountCash)
+        .minus(tds)
+        .plus(tcs);
+      const roundOff = toDecimal(billBalance.toFixed(0)).minus(billBalance);
+      // Nothing to post when the bill already lands on a whole rupee.
+      if (roundOff.abs().lt(toDecimal('0.005'))) return [];
+      return [
+        roundOff.gt(0)
+          ? {
+              // Owed goes UP — supplier → SHOP, same direction as a Cash Purchase Charge.
+              fromAccountId: input.account_id,
+              toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: roundOff.toFixed(2),
+              remarks: 'Round Off',
+            }
+          : {
+              // Owed goes DOWN — SHOP → supplier, same direction as a discount.
+              fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+              toAccountId: input.account_id,
+              itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+              quantity: roundOff.abs().toFixed(2),
+              remarks: 'Round Off',
+            },
+      ];
+    })(),
   ];
 
   const { group, entries } = await createEntryGroup({
@@ -400,16 +443,20 @@ async function computePurchaseBillStatus(groupId: string) {
   // discount) and TCS ADDS to it (supplier → SHOP, same direction/effect as a
   // Cash Purchase Charge). Both need pulling out by remarks for the same reason
   // Discount does.
+  // "Round Off" is likewise structurally identical to a payment when it lowers
+  // what's owed (SHOP → supplier), so it must be pulled out by remarks too.
   const isSpecial = (r: (typeof rows)[number]) =>
     r.entry.remarks === "Cash Purchase Charge" ||
     r.entry.remarks === "Discount" ||
     r.entry.remarks === "TDS Adjustment" ||
     r.entry.remarks === "TCS Adjustment" ||
+    r.entry.remarks === "Round Off" ||
     isConversionEntry;
   const bankEntries = moneyEntries.filter((r) => !isSpecial(r) && r.entry.to_account_id === group.account_id);
   const discountEntries = moneyEntries.filter((r) => r.entry.remarks === "Discount");
   const tdsEntries = moneyEntries.filter((r) => r.entry.remarks === "TDS Adjustment");
   const tcsEntries = moneyEntries.filter((r) => r.entry.remarks === "TCS Adjustment");
+  const roundOffEntries = moneyEntries.filter((r) => r.entry.remarks === "Round Off");
 
   const rate = parseFloat(group.rate_per_gram || "0");
   const cashChargeAmount = cashChargeEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
@@ -423,8 +470,18 @@ async function computePurchaseBillStatus(groupId: string) {
   const discountCash = discountEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
   const tdsCash = tdsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
   const tcsCash = tcsEntries.reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
+  // Round Off is signed by direction: supplier → SHOP raises what's owed,
+  // SHOP → supplier lowers it (see createPurchase). Folding it in here is what
+  // makes a rounded bill actually report balance 0 instead of a few stray paise.
+  const roundOffCash = roundOffEntries.reduce(
+    (s, r) =>
+      s +
+      (r.entry.from_account_id === group.account_id ? 1 : -1) *
+        parseFloat(r.entry.quantity || "0"),
+    0,
+  );
   const paid = bankPaid + discountCash + tdsCash - tcsCash;
-  const balance = Math.round((currentCash - paid) * 100) / 100;
+  const balance = Math.round((currentCash - paid + roundOffCash) * 100) / 100;
 
   return {
     group,

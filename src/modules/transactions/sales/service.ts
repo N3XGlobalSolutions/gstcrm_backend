@@ -248,6 +248,7 @@ async function computeSaleBillStatus(groupId: string) {
         r.entry.remarks !== "Discount" &&
         r.entry.remarks !== "TDS Adjustment" &&
         r.entry.remarks !== "TCS Adjustment" &&
+        r.entry.remarks !== "Round Off" &&
         !isConversionEntry &&
         r.entry.from_account_id === group.account_id,
     )
@@ -262,8 +263,21 @@ async function computeSaleBillStatus(groupId: string) {
     .filter((r) => r.entry.remarks === "TCS Adjustment")
     .reduce((s, r) => s + parseFloat(r.entry.quantity || "0"), 0);
 
+  // Round Off is signed by direction: SHOP → customer raises what's owed,
+  // customer → SHOP lowers it (see createSale). Folding it in here is what makes
+  // a rounded bill actually report balance 0 instead of a few stray paise.
+  const roundOffCash = moneyEntries
+    .filter((r) => r.entry.remarks === "Round Off")
+    .reduce(
+      (s, r) =>
+        s +
+        (r.entry.to_account_id === group.account_id ? 1 : -1) *
+          parseFloat(r.entry.quantity || "0"),
+      0,
+    );
+
   const paid = bankPaidAmount + discountAmount + tdsCash - tcsCash;
-  const balance = Math.round((currentCash - paid) * 100) / 100;
+  const balance = Math.round((currentCash - paid + roundOffCash) * 100) / 100;
 
   return {
     group,
@@ -689,6 +703,43 @@ export async function createSale(
             },
           ]
         : []),
+      // Round Off — settles the bill to a whole rupee IN THE LEDGER, not just on
+      // the printed estimation. Previously computed at print time and applied only
+      // to the displayed Closing Balance, so the sub-rupee remainder stayed in the
+      // customer's real balance and compounded bill after bill. Posting it here
+      // keeps the printed figures and the ledger identical.
+      // CASH mode only — a PURE-mode bill never touches the cash ledger.
+      ...(() => {
+        if (!isCashMode) return [];
+        const tds = input.tds_enabled ? toDecimal(input.tds_amount ?? "0") : toDecimal("0");
+        const tcs = input.tcs_enabled ? toDecimal(input.tcs_amount ?? "0") : toDecimal("0");
+        const billBalance = pureValueCash
+          .minus(toDecimal(input.bank_amount || "0"))
+          .minus(totalDiscountCash)
+          .minus(tds)
+          .plus(tcs);
+        const roundOff = toDecimal(billBalance.toFixed(0)).minus(billBalance);
+        if (roundOff.abs().lt(toDecimal("0.005"))) return [];
+        return [
+          roundOff.gt(0)
+            ? {
+                // Customer owes MORE — SHOP → customer, same direction as a Cash Sale Charge.
+                fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+                toAccountId: input.account_id,
+                itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+                quantity: roundOff.toFixed(2),
+                remarks: "Round Off",
+              }
+            : {
+                // Customer owes LESS — customer → SHOP, same direction as a discount.
+                fromAccountId: input.account_id,
+                toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+                itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+                quantity: roundOff.abs().toFixed(2),
+                remarks: "Round Off",
+              },
+        ];
+      })(),
     ];
 
     const result = await createEntryGroup(
