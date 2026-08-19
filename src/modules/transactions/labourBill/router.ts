@@ -11,6 +11,7 @@ import {
   GetCycleDetailSchema,
   ConvertGoldToCashSchema,
   ConvertCashToGoldSchema,
+  ReceiveCashSchema,
 } from "./schema";
 import {
   listLabourBills,
@@ -23,6 +24,7 @@ import {
   getCycleDetail,
   convertGoldToCash,
   convertCashToGold,
+  receiveCash,
 } from "./service";
 
 export const labourBillRouter = router({
@@ -44,4 +46,7 @@ export const labourBillRouter = router({
   // Opening-balance gold/cash conversion
   convertGoldToCash: guardedProcedure("labourBill", "labourBill", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),
   convertCashToGold: guardedProcedure("labourBill", "labourBill", "edit").input(ConvertCashToGoldSchema).mutation(async ({ input }) => convertCashToGold(input)),
+
+  // Standalone cash receive — no bill/cycle required, just the goldsmith and an amount.
+  receiveCash: guardedProcedure("labourBill", "labourBill", "edit").input(ReceiveCashSchema).mutation(async ({ input }) => receiveCash(input)),
 });

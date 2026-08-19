@@ -356,7 +356,9 @@ export async function getLotBalances(
       SUM(CASE WHEN to_account_id = ${accountId} THEN quantity ELSE -quantity END)::text AS net_quantity,
       MAX(purity)::text AS purity,
       MAX(average_touch)::text AS average_touch,
-      SUM(CASE WHEN to_account_id = ${accountId} THEN pure_quantity ELSE -pure_quantity END)::text AS net_pure_quantity,
+      -- Physical stock composition (quantity × purity), not the ledger's stored
+      -- pure_quantity — same fix as getAccountLotBalances above, see its comment.
+      SUM(CASE WHEN to_account_id = ${accountId} THEN quantity * COALESCE(purity, 0) / 100 ELSE -(quantity * COALESCE(purity, 0) / 100) END)::text AS net_pure_quantity,
       MIN(created_at) AS created_at
     FROM ${entries}
     WHERE item_id = ${itemId}
@@ -400,7 +402,14 @@ export async function getAccountLotBalances(
       net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
       purity: sql`MAX(${entries.purity})::text`,
       average_touch: sql`MAX(${entries.average_touch})::text`,
-      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.pure_quantity} ELSE -${entries.pure_quantity} END)::text`,
+      // Physical stock composition (quantity × purity), NOT the ledger's stored
+      // pure_quantity — cash-mode Sale/Purchase/Labour Bill entries deliberately
+      // zero pure_quantity (that's correct for the CUSTOMER's cash ledger, not for
+      // what physically sits in the shop's stock). Reading pure_quantity directly
+      // here understated stock pure content by however much moved via cash-mode
+      // bills, occasionally into negative territory (same bug class already fixed
+      // for the dashboard's Total Purchase metric — see dashboard/router.ts).
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} * COALESCE(${entries.purity}, 0) / 100 ELSE -(${entries.quantity} * COALESCE(${entries.purity}, 0) / 100) END)::text`,
       created_at: sql`MIN(${entries.created_at})`,
     })
     .from(entries)
@@ -529,7 +538,9 @@ export async function getAccountItemBalances(
       net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
       purity: sql`MAX(${entries.purity})::text`,
       average_touch: sql`MAX(${entries.average_touch})::text`,
-      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.pure_quantity} ELSE -${entries.pure_quantity} END)::text`,
+      // Physical stock composition (quantity × purity), not the ledger's stored
+      // pure_quantity — same fix as getAccountLotBalances above, see its comment.
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} * COALESCE(${entries.purity}, 0) / 100 ELSE -(${entries.quantity} * COALESCE(${entries.purity}, 0) / 100) END)::text`,
       created_at: sql`MIN(${entries.created_at})`,
     })
     .from(entries)

@@ -26,6 +26,7 @@ import {
   type GetCycleDetailSchema,
   type ConvertGoldToCashSchema,
   type ConvertCashToGoldSchema,
+  type ReceiveCashSchema,
 } from "./schema";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
@@ -635,6 +636,37 @@ export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldS
         itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
         quantity: "0",
         pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
+}
+
+// ─── receiveCash ────────────────────────────────────────────────────────────
+// A standalone cash payment FROM the goldsmith TO the shop, independent of any
+// bill/cycle — same "no bill_cycle_id required" pattern as the gold/cash
+// conversions above (goes straight through createEntryGroup, skipBillNo).
+// Direction: goldsmith → SHOP, same as the bank_receive field inside a full
+// labour bill — a repayment, so it LOWERS what the goldsmith owes (confirmed
+// against a real ledger trace; see LabourBillContext's cashIn/cashOut).
+export async function receiveCash(input: z.infer<typeof ReceiveCashSchema>) {
+  const amount = toDecimal(input.amount);
+  const label = input.details || "Cash";
+
+  const { group, entries } = await createEntryGroup({
+    type: "LABOUR_BILL",
+    accountId: input.account_id,
+    date: input.date,
+    remarks: `Cash Received (${label})`,
+    skipBillNo: true,
+    entries: [
+      {
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: amount.toFixed(2),
         remarks: label,
       },
     ],

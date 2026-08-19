@@ -136,6 +136,17 @@ export const ConvertCashToGoldSchema = z.object({
   rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
 });
 
+// ─── Standalone cash receive (no bill/cycle required) ─────────────────────────
+// A goldsmith paying the shop cash outside of any item bill — just pick the
+// goldsmith and record it, same "independent of any bill" pattern as the
+// gold/cash conversions above.
+export const ReceiveCashSchema = z.object({
+  account_id: z.string().uuid(),
+  amount: positiveDecimalSchema,    // cash amount received — must be > 0
+  date: dateSchema,
+  details: z.string().optional(),  // bank name/A/C or "Cash"
+});
+
 // ─── Re-export types ───────────────────────────────────────────────────────────
 export type CreateLabourBillInput = z.infer<typeof CreateLabourBillSchema>;
 export type UpdateLabourBillInput = z.infer<typeof UpdateLabourBillSchema>;
