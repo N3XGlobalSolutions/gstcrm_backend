@@ -80,8 +80,10 @@ const CashConversionSchema = z.object({
 export const CreateLabourBillSchema = z.object({
   account_id: z.string().uuid(),
   date: dateSchema,
-  // rate_per_gram: positiveDecimalSchema enforces > 0 — zero rates blocked
-  rate_per_gram: positiveDecimalSchema.optional(),
+  // Rate/Gm is MANDATORY on a labour bill: every cash figure on the slip is derived
+  // from it, so a bill saved without one has a silently-zeroed money side.
+  // positiveDecimalSchema also enforces > 0, so "0" is rejected too.
+  rate_per_gram: positiveDecimalSchema,
   remarks: z.string().optional(),
 
   // Bill Cycle: the permanent ledger this entry belongs to.
