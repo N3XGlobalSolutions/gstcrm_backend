@@ -190,12 +190,25 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         }
       }
 
-      // Compute average touch for the entry
+      // Compute average touch for the entry.
+      // Two paths differ in what `entry.quantity` represents:
+      //   Override path  (wastageQuantity passed explicitly): quantity = physical base weight
+      //     → Avg T = pureQuantity / quantity × 100
+      //   Computed path  (wastageQuantity derived from wastageMode/wastageValue): quantity = gross (base + wastage)
+      //     → Avg T = pureQuantity / (quantity − wastageQuantity) × 100
+      // Using the wrong denominator (gross instead of base) inflates Avg T above the real touch %.
       let averageTouch: string | undefined;
       if (pureQuantity && entry.quantity) {
         const qty = toDecimal(entry.quantity);
-        const wQty = wastageQuantity ? toDecimal(wastageQuantity) : toDecimal("0");
-        const origWeight = qty.minus(wQty);
+        let origWeight: ReturnType<typeof toDecimal>;
+        if (entry.wastageQuantity !== undefined) {
+          // Override path: quantity IS the base weight already; wastage is separate.
+          origWeight = qty;
+        } else {
+          // Computed path: quantity is the gross weight; subtract wastage to get base.
+          const wQty = wastageQuantity ? toDecimal(wastageQuantity) : toDecimal("0");
+          origWeight = qty.minus(wQty);
+        }
         if (origWeight.gt(0)) {
           averageTouch = toQuantityString(toDecimal(pureQuantity).div(origWeight).mul(100));
         }

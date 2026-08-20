@@ -316,8 +316,15 @@ export async function createLabourBill(
   }
 
   // ── 2. Ornament Issue: SHOP → Goldsmith (with wastage) ─────────────────────
+  // KEY DESIGN (mirrors Ornament Receipt below): the PHYSICAL ornament weight is
+  // what leaves the shop's stock — the wastage is an accounting charge against the
+  // goldsmith's gold, not extra metal handed over. Previously `quantity` was the
+  // wastage-inflated grossWeight, so issuing a 10.000g ornament at 2% wastage
+  // removed 10.220g from stock even though only 10.000g physically left.
+  // The goldsmith's pure balance is unchanged by this fix — it still carries the
+  // full gross pure (wastage included) via the pureQuantity override.
   for (const item of input.ornament_issue) {
-    const { grossWeight, wastageGm } = calcOrnamentEntry(item);
+    const { grossWeight, pureQuantity: grossPure, wastageGm } = calcOrnamentEntry(item);
 
     if (item.lot_id) {
       const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
@@ -340,13 +347,17 @@ export async function createLabourBill(
       toAccountId: input.account_id,
       itemId: item.item_id,
       lotId: item.lot_id,
-      quantity: grossWeight,       // full gross weight (including wastage)
+      // Physical weight only — this is what actually leaves the shop's stock lot.
+      quantity: item.quantity,
       purity: item.purity,
+      // Override: total pure gold the goldsmith is accountable for =
+      // (physicalWeight + wastageGm) × touch%. Keeps the wastage on their gold
+      // balance without inflating the stock movement above.
+      pureQuantity: grossPure,
       wastageMode: "PERCENT",
       wastageValue: item.wastage_percent,
-      // grossWeight already includes wastage, so it must NOT be used as the base for
-      // recomputing wastage_quantity (that would re-apply wastage% on top of an
-      // already-inflated weight). Override with the correctly-derived amount instead.
+      // quantity is the physical base weight, so wastage_quantity must be passed
+      // explicitly rather than recomputed off an already-inflated figure.
       wastageQuantity: wastageGm,
     });
   }

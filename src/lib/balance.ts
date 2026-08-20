@@ -354,8 +354,8 @@ export async function getLotBalances(
     SELECT 
       lot_id,
       SUM(CASE WHEN to_account_id = ${accountId} THEN quantity ELSE -quantity END)::text AS net_quantity,
-      MAX(purity)::text AS purity,
-      MAX(average_touch)::text AS average_touch,
+      MAX(CASE WHEN to_account_id = ${accountId} THEN purity ELSE NULL END)::text AS purity,
+      MAX(CASE WHEN to_account_id = ${accountId} THEN average_touch ELSE NULL END)::text AS average_touch,
       -- Physical stock composition (quantity × purity), not the ledger's stored
       -- pure_quantity — same fix as getAccountLotBalances above, see its comment.
       SUM(CASE WHEN to_account_id = ${accountId} THEN quantity * COALESCE(purity, 0) / 100 ELSE -(quantity * COALESCE(purity, 0) / 100) END)::text AS net_pure_quantity,
@@ -400,8 +400,11 @@ export async function getAccountLotBalances(
       item_id: entries.item_id,
       lot_id: entries.lot_id,
       net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
-      purity: sql`MAX(${entries.purity})::text`,
-      average_touch: sql`MAX(${entries.average_touch})::text`,
+      purity: sql`MAX(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.purity} ELSE NULL END)::text`,
+      // Use average_touch from IN entries (receipts into this account) only.
+      // OUT entries (sales/issues FROM this account) may have a different or NULL
+      // average_touch — taking MAX() across both would silently pick the wrong one.
+      average_touch: sql`MAX(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.average_touch} ELSE NULL END)::text`,
       // Physical stock composition (quantity × purity), NOT the ledger's stored
       // pure_quantity — cash-mode Sale/Purchase/Labour Bill entries deliberately
       // zero pure_quantity (that's correct for the CUSTOMER's cash ledger, not for

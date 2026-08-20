@@ -316,8 +316,14 @@ export async function createJobWork(
   }
 
   // ── 2. Ornament Issue: SHOP → Account (with wastage) ───────────────────────
+  // KEY DESIGN (mirrors Ornament Receipt below): the PHYSICAL ornament weight is
+  // what leaves the shop's stock — the wastage is an accounting charge against the
+  // account's gold, not extra metal handed over. Previously `quantity` was the
+  // wastage-inflated grossWeight, so issuing a 10.000g ornament at 2% wastage
+  // removed 10.220g from stock even though only 10.000g physically left. The
+  // account's pure balance is unchanged — it still carries the full gross pure.
   for (const item of input.ornament_issue) {
-    const { grossWeight, wastageGm } = calcOrnamentEntry(item);
+    const { grossWeight, pureQuantity: grossPure, wastageGm } = calcOrnamentEntry(item);
 
     if (item.lot_id) {
       const lots = await getLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, item.item_id);
@@ -340,8 +346,13 @@ export async function createJobWork(
       toAccountId: input.account_id,
       itemId: item.item_id,
       lotId: item.lot_id,
-      quantity: grossWeight,       // full gross weight (including wastage)
+      // Physical weight only — this is what actually leaves the shop's stock lot.
+      quantity: item.quantity,
       purity: item.purity,
+      // Override: total pure gold the account is accountable for =
+      // (physicalWeight + wastageGm) × touch%. Keeps the wastage on their gold
+      // balance without inflating the stock movement above.
+      pureQuantity: grossPure,
       wastageMode: "PERCENT",
       wastageValue: item.wastage_percent,
       // grossWeight already includes wastage, so it must NOT be used as the base for
