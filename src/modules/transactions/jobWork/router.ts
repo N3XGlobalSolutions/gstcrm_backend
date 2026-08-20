@@ -9,6 +9,9 @@ import {
   CreateCycleSchema,
   ListCyclesSchema,
   GetCycleDetailSchema,
+  ConvertGoldToCashSchema,
+  ConvertCashToGoldSchema,
+  ReceiveCashSchema,
 } from "./schema";
 import {
   listJobWork,
@@ -19,6 +22,9 @@ import {
   createCycle,
   listCycles,
   getCycleDetail,
+  convertGoldToCash,
+  convertCashToGold,
+  receiveCash,
 } from "./service";
 
 export const jobWorkRouter = router({
@@ -36,4 +42,9 @@ export const jobWorkRouter = router({
   createCycle:    guardedProcedure("jobWork", "jobWork", "edit").input(CreateCycleSchema).mutation(async ({ input }) => createCycle(input)),
   listCycles:     guardedProcedure("jobWork", "jobWork", "view").input(ListCyclesSchema).query(async ({ input }) => listCycles(input)),
   getCycleDetail: guardedProcedure("jobWork", "jobWork", "view").input(GetCycleDetailSchema).query(async ({ input }) => getCycleDetail(input)),
+
+  // Gold ↔ Cash conversion + standalone Receive Cash (ported from Labour Bill)
+  convertGoldToCash: guardedProcedure("jobWork", "jobWork", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),
+  convertCashToGold: guardedProcedure("jobWork", "jobWork", "edit").input(ConvertCashToGoldSchema).mutation(async ({ input }) => convertCashToGold(input)),
+  receiveCash:       guardedProcedure("jobWork", "jobWork", "edit").input(ReceiveCashSchema).mutation(async ({ input }) => receiveCash(input)),
 });

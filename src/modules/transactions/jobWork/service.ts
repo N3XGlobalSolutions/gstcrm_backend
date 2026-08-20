@@ -24,6 +24,9 @@ import {
   type CreateCycleSchema,
   type ListCyclesSchema,
   type GetCycleDetailSchema,
+  type ConvertGoldToCashSchema,
+  type ConvertCashToGoldSchema,
+  type ReceiveCashSchema,
 } from "./schema";
 
 // ─── Wastage formula for Job Work ornament items ──────────────────────────────
@@ -428,14 +431,26 @@ export async function createJobWork(
     });
   }
 
-  // ── 6.6. TDS ───────────────────────────────────────────────────────────────
-  if (input.tds && toDecimal(input.tds).gt(0)) {
+  // ── 6.6. TDS — subtracts from what the account owes (SHOP → account, same
+  // direction/effect as a discount). Mirrors createLabourBill. ───────────────
+  if (input.tds_enabled && input.tds_amount && toDecimal(input.tds_amount).gt(0)) {
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       toAccountId: input.account_id,
       itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-      quantity: input.tds,
-      remarks: "TDS",
+      quantity: input.tds_amount,
+      remarks: "TDS Adjustment",
+    });
+  }
+
+  // ── 6.7. TCS — adds to what the account owes (account → SHOP). ────────────
+  if (input.tcs_enabled && input.tcs_amount && toDecimal(input.tcs_amount).gt(0)) {
+    entries.push({
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+      quantity: input.tcs_amount,
+      remarks: "TCS Adjustment",
     });
   }
 
@@ -468,7 +483,8 @@ export async function createJobWork(
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     jobWorkCycleId: input.bill_cycle_id,
-    tdsAmount: input.tds,
+    tdsAmount: input.tds_amount,
+    tcsAmount: input.tcs_amount,
     entries,
   });
 
@@ -506,4 +522,147 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
 
 export async function deleteJobWork(input: z.infer<typeof DeleteTxSchema>) {
   throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for job work");
+}
+
+// ─── convertGoldToCash ────────────────────────────────────────────────────────
+// Ported from Labour Bill. Converts part of an account's outstanding pure-gold
+// balance into a cash debt at an agreed rate. Works in either sign direction:
+// whichever side owes the gold, the gold magnitude shrinks toward zero and a
+// matching cash magnitude grows on that same side. Posted with skipBillNo so it
+// never consumes a slot in the cycle's bill numbering.
+export async function convertGoldToCash(input: z.infer<typeof ConvertGoldToCashSchema>) {
+  const goldGrams = toDecimal(input.gold_grams);
+  const cashAmount = goldGrams.times(toDecimal(input.rate_per_gram));
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingPure = toDecimal(opening.totalPure.toFixed(3)); // positive = account owes shop
+
+  if (openingPure.eq(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding gold balance to convert.");
+  }
+  const availablePure = openingPure.abs();
+  if (goldGrams.gt(availablePure.plus(0.001))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ${goldGrams.toFixed(3)}g — only ${availablePure.toFixed(3)}g of gold is outstanding for this account.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Gold to Cash Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+  const isPositive = openingPure.gt(0);
+
+  const { group, entries } = await createEntryGroup({
+    type: "JOB_WORK",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    skipBillNo: true,
+    entries: [
+      {
+        // Shrinks the gold magnitude toward zero (whichever side owes it)
+        fromAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+      {
+        // Grows a cash debt of matching magnitude on the same side
+        fromAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        toAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
+}
+
+// ─── convertCashToGold ────────────────────────────────────────────────────────
+// The opposite of convertGoldToCash — see its comment for the sign explanation.
+export async function convertCashToGold(input: z.infer<typeof ConvertCashToGoldSchema>) {
+  const cashAmount = toDecimal(input.cash_amount);
+  const rate = toDecimal(input.rate_per_gram);
+  const goldGrams = cashAmount.div(rate);
+
+  const opening = await getAggregateBalances(input.account_id);
+  const openingCash = toDecimal(opening.totalCash.toFixed(2)); // positive = account owes shop
+
+  if (openingCash.eq(0)) {
+    throw new AppError("BUSINESS_RULE_VIOLATION", "This account has no outstanding cash balance to convert.");
+  }
+  const availableCash = openingCash.abs();
+  if (cashAmount.gt(availableCash.plus(0.01))) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      `Cannot convert ₹${cashAmount.toFixed(2)} — only ₹${availableCash.toFixed(2)} of cash is outstanding for this account.`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0]!;
+  const label = `Cash to Gold Conversion (${goldGrams.toFixed(3)}g @ ₹${toDecimal(input.rate_per_gram).toFixed(2)}/g)`;
+  const isPositive = openingCash.gt(0);
+
+  const { group, entries } = await createEntryGroup({
+    type: "JOB_WORK",
+    accountId: input.account_id,
+    date: today,
+    ratePerGram: input.rate_per_gram,
+    remarks: label,
+    skipBillNo: true,
+    entries: [
+      {
+        // Shrinks the cash magnitude toward zero (whichever side owes it)
+        fromAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        toAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: cashAmount.toFixed(2),
+        remarks: label,
+      },
+      {
+        // Grows a gold debt of matching magnitude on the same side
+        fromAccountId: isPositive ? SYSTEM_ACCOUNTS.SHOP_ID : input.account_id,
+        toAccountId: isPositive ? input.account_id : SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: "0",
+        pureQuantity: goldGrams.toFixed(3),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
+}
+
+// ─── receiveCash ──────────────────────────────────────────────────────────────
+// A standalone cash payment FROM the account TO the shop, independent of any
+// bill/cycle. Direction matches the bank_receive field inside a full job work —
+// a repayment, so it LOWERS what the account owes.
+export async function receiveCash(input: z.infer<typeof ReceiveCashSchema>) {
+  const amount = toDecimal(input.amount);
+  const label = input.details || "Cash";
+
+  const { group, entries } = await createEntryGroup({
+    type: "JOB_WORK",
+    accountId: input.account_id,
+    date: input.date,
+    remarks: `Cash Received (${label})`,
+    skipBillNo: true,
+    entries: [
+      {
+        fromAccountId: input.account_id,
+        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: amount.toFixed(2),
+        remarks: label,
+      },
+    ],
+  });
+
+  return { group, entries };
 }

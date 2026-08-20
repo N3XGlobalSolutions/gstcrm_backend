@@ -80,8 +80,10 @@ const CashConversionSchema = z.object({
 export const CreateJobWorkSchema = z.object({
   account_id: z.string().uuid(),
   date: dateSchema,
-  // rate_per_gram: positiveDecimalSchema enforces > 0 — zero rates blocked
-  rate_per_gram: positiveDecimalSchema.optional(),
+  // Rate/Gm is MANDATORY (same rule as Labour Bill): every cash figure on the slip
+  // is derived from it, so a slip saved without one has a silently-zeroed money
+  // side. positiveDecimalSchema also enforces > 0, so "0" is rejected too.
+  rate_per_gram: positiveDecimalSchema,
   remarks: z.string().optional(),
 
   // Bill Cycle: the permanent ledger this entry belongs to.
@@ -102,7 +104,14 @@ export const CreateJobWorkSchema = z.object({
   bank_receive:         positiveDecimalSchema.optional(), // Account pays SHOP (cash in) — must be > 0 if provided
   bank_receive_details: z.string().optional(),
   discount:             positiveDecimalSchema.optional(), // must be > 0 if provided
-  tds:                  positiveDecimalSchema.optional(), // must be > 0 if provided
+
+  // TDS/TCS — same convention as Labour Bill / Purchase / Sales: TDS subtracts from
+  // what the account owes, TCS adds to it. The amount is precomputed on the frontend
+  // (percent × taxable base, net of the 3% GST portion) and sent as a fixed rupee figure.
+  tds_enabled: z.boolean().optional(),
+  tds_amount:  positiveDecimalSchema.optional(),
+  tcs_enabled: z.boolean().optional(),
+  tcs_amount:  positiveDecimalSchema.optional(),
 
   // Partial gold-to-cash conversions (each converts slip pure into cash debt)
   cash_conversions: z.array(CashConversionSchema).default([]),
@@ -113,6 +122,28 @@ export const UpdateJobWorkSchema = CreateJobWorkSchema.extend({
 });
 
 // ─── Re-export types ───────────────────────────────────────────────────────────
+// ─── Gold ↔ Cash conversion + Receive Cash ────────────────────────────────────
+// Ported from Labour Bill so Job Works has the same Convert / Receive Cash actions.
+
+export const ConvertGoldToCashSchema = z.object({
+  account_id: z.string().uuid(),
+  gold_grams: positiveDecimalSchema,      // pure gold grams being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
+});
+
+export const ConvertCashToGoldSchema = z.object({
+  account_id: z.string().uuid(),
+  cash_amount: positiveDecimalSchema,     // cash being converted — must be > 0
+  rate_per_gram: positiveDecimalSchema,   // rate applied — must be > 0
+});
+
+export const ReceiveCashSchema = z.object({
+  account_id: z.string().uuid(),
+  amount: positiveDecimalSchema,    // cash amount received — must be > 0
+  date: dateSchema,
+  details: z.string().optional(),   // bank name/A/C or "Cash"
+});
+
 export type CreateJobWorkInput = z.infer<typeof CreateJobWorkSchema>;
 export type UpdateJobWorkInput = z.infer<typeof UpdateJobWorkSchema>;
 export type CreateCycleInput = z.infer<typeof CreateCycleSchema>;
