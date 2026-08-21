@@ -70,14 +70,19 @@ async function getSummary() {
     }
   }
 
-  // 2. Ornament count: number of distinct items with positive balance in shop
+  // 2. Ornament count: number of distinct lots with positive balance in shop.
+  // Ornament stock is tracked per lot (see getOrnamentStock / the Stock page's
+  // ornament table, which shows one row per lot_id) — grouping by item_id alone
+  // collapsed every lot of the same item into a single count, so a stock table
+  // showing many lots would report a much smaller "Ornaments" summary number.
   const ornamentBalances = new Map<string, Decimal>();
   for (const lot of shopLots) {
     if (ornamentItemIds.includes(lot.item_id)) {
       const qty = lot.quantity ?? zero;
       if (isFinite(Number(qty))) {
-        const current = ornamentBalances.get(lot.item_id) ?? zero;
-        ornamentBalances.set(lot.item_id, current.plus(qty));
+        const key = `${lot.item_id}::${lot.lot_id}`;
+        const current = ornamentBalances.get(key) ?? zero;
+        ornamentBalances.set(key, current.plus(qty));
       }
     }
   }
@@ -167,7 +172,19 @@ export async function getOrnamentStock(input: { page: number; limit: number }) {
   const ornamentItemIds = ornamentItems.map((item) => item.id);
   const lots = await getAccountLotBalances(SYSTEM_ACCOUNTS.SHOP_ID, ornamentItemIds);
 
-  const flatLots = lots.map((lot) => {
+  // Only lots with a positive physical balance are actually "in stock" — a lot
+  // that's been fully sold/returned nets to zero or negative and has nothing
+  // left to show. Without this filter the table listed every lot ever touched
+  // (including negative-balance ones), while the summary card's "Ornaments"
+  // count only counted positive-balance lots — the two numbers disagreed
+  // (e.g. table showing 5 rows, card showing 2) even though they describe the
+  // same stock.
+  const positiveLots = lots.filter((lot) => {
+    const qty = Number(lot.quantity);
+    return !isNaN(qty) && qty > 0;
+  });
+
+  const flatLots = positiveLots.map((lot) => {
     const item = ornamentItems.find((i) => i.id === lot.item_id)!;
     const qty = Number(lot.quantity);
     const pur = lot.purity ? Number(lot.purity) : null;

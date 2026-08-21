@@ -632,6 +632,7 @@ export async function createSale(
         purity: item.purity,
         wastageMode: item.wastage_mode as "PERCENT" | "GRAM",
         wastageValue: item.wastage_value,
+        pieceCount: item.piece_count,
       })),
       // In CASH mode: record the total cash value of the sale as a cash debit on the customer's account
       ...(isCashMode && pureValueCash.gt(0)

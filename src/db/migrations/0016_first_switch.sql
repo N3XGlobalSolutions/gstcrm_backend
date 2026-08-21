@@ -1,0 +1,1 @@
+ALTER TABLE "entries" ADD COLUMN "piece_count" numeric(20, 3);

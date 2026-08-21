@@ -48,6 +48,7 @@ export interface EntryInput {
   amount?: string; // decimal string
   remarks?: string;
   lotId?: string; // Optional lot_id specifically for OUT items to track consumption
+  pieceCount?: string; // optional informational piece/quantity count (e.g. "2 rings") — decimal string
 }
 
 export interface CreateEntryGroupInput {
@@ -251,6 +252,7 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         amount: entry.amount,
         average_touch: averageTouch,
         remarks: entry.remarks,
+        piece_count: entry.pieceCount,
       });
     }
 

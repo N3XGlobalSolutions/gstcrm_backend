@@ -29,6 +29,8 @@ const SalesItemSchema = z.object({
   purity: puritySchema,
   wastage_mode: z.enum(["PERCENT", "GRAM"]),
   wastage_value: nonNegativeDecimalSchema,
+  // Optional piece/quantity count (e.g. "2 rings") — purely informational.
+  piece_count: nonNegativeDecimalSchema.optional(),
 }).superRefine((val, ctx) => {
   // When PERCENT mode: value must be between 0 and 100 (inclusive)
   if (val.wastage_mode === "PERCENT") {

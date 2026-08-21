@@ -40,6 +40,9 @@ export const entries = pgTable(
     quantity: numeric("quantity", { precision: 20, scale: 8 }).notNull(),
     purity: numeric("purity", { precision: 20, scale: 8 }),
     pure_quantity: numeric("pure_quantity", { precision: 20, scale: 8 }),
+    // Optional piece/quantity count entered on Sale (e.g. "2 rings") — purely
+    // informational, does not affect weight/pure/balance math anywhere.
+    piece_count: numeric("piece_count", { precision: 20, scale: 3 }),
     // Wastage fields
     wastage_mode: wastageModeEnum("wastage_mode"),
     wastage_value: numeric("wastage_value", { precision: 20, scale: 8 }),
