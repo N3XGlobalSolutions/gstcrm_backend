@@ -10,6 +10,7 @@ import { stockRouter } from "@/modules/stock/router";
 import { dashboardRouter } from "@/modules/dashboard/router";
 import { notificationsRouter } from "@/modules/notifications/router";
 import { settingsRouter } from "@/modules/settings/router";
+import { goldRateRouter } from "@/modules/goldRate/router";
 
 export const appRouter = router({
   system: router({
@@ -34,6 +35,7 @@ export const appRouter = router({
   dashboard: dashboardRouter,
   notifications: notificationsRouter,
   settings: settingsRouter,
+  goldRate: goldRateRouter,
 });
 
 export type AppRouter = typeof appRouter;

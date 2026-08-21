@@ -426,10 +426,12 @@ async function getProfitLossStock(input: { page: number; limit: number }) {
       .where(and(...conditions)),
     db
       .select({
-        sales_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'SALE' THEN ${entriesTable.pure_quantity} ELSE 0 END), 0)::text`,
-        purchases_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'PURCHASE' THEN ${entriesTable.pure_quantity} ELSE 0 END), 0)::text`,
-        sales_amount: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'SALE' THEN ${entriesTable.pure_quantity} * COALESCE(${entriesTable.rate}, ${entryGroups.rate_per_gram}, 0) ELSE 0 END), 0)::text`,
-        purchases_amount: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'PURCHASE' THEN ${entriesTable.pure_quantity} * COALESCE(${entriesTable.rate}, ${entryGroups.rate_per_gram}, 0) ELSE 0 END), 0)::text`,
+        // Physical pure (quantity × purity), NOT the ledger's stored pure_quantity —
+        // cash-mode Sale/Purchase entries deliberately zero pure_quantity (see lib/balance.ts).
+        sales_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'SALE' THEN ${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100 ELSE 0 END), 0)::text`,
+        purchases_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'PURCHASE' THEN ${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100 ELSE 0 END), 0)::text`,
+        sales_amount: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'SALE' THEN (${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100) * COALESCE(${entriesTable.rate}, ${entryGroups.rate_per_gram}, 0) ELSE 0 END), 0)::text`,
+        purchases_amount: sql<string>`COALESCE(SUM(CASE WHEN ${entryGroups.type} = 'PURCHASE' THEN (${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100) * COALESCE(${entriesTable.rate}, ${entryGroups.rate_per_gram}, 0) ELSE 0 END), 0)::text`,
       })
       .from(entriesTable)
       .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
@@ -441,7 +443,9 @@ async function getProfitLossStock(input: { page: number; limit: number }) {
     const isPurchase = row.group.type === "PURCHASE";
     const quantity = toDecimal(row.entry.quantity);
     const purity = toDecimal(row.entry.average_touch || row.entry.purity || "0");
-    const pure = toDecimal(row.entry.pure_quantity || "0");
+    // Physical pure (quantity × purity), NOT the ledger's stored pure_quantity —
+    // cash-mode Sale/Purchase entries deliberately zero pure_quantity (see lib/balance.ts).
+    const pure = quantity.mul(toDecimal(row.entry.purity || "0")).div(100);
     const rate = toDecimal(row.entry.rate || row.group.rate_per_gram || "0");
     const total = pure.mul(rate);
 
@@ -569,7 +573,9 @@ async function getExportData() {
     const isPurchase = row.group.type === "PURCHASE";
     const quantity = toDecimal(row.entry.quantity);
     const purity = toDecimal(row.entry.average_touch || row.entry.purity || "0");
-    const pure = toDecimal(row.entry.pure_quantity || "0");
+    // Physical pure (quantity × purity), NOT the ledger's stored pure_quantity —
+    // cash-mode Sale/Purchase entries deliberately zero pure_quantity (see lib/balance.ts).
+    const pure = quantity.mul(toDecimal(row.entry.purity || "0")).div(100);
     const rate = toDecimal(row.entry.rate || row.group.rate_per_gram || "0");
     const total = pure.mul(rate);
 
