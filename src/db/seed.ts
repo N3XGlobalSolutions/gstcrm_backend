@@ -134,7 +134,17 @@ async function seed() {
     console.log("✅ Superadmin user created");
   } else {
     adminUserId = existingAdmin.id;
-    console.log("ℹ️  Superadmin user already exists");
+    const passwordHash = await bcrypt.hash("Hello@2026", 12);
+    await db
+      .update(appUsers)
+      .set({
+        password_hash: passwordHash,
+        user_group: "admin",
+        is_deleted: false,
+        updated_at: new Date(),
+      })
+      .where(eq(appUsers.id, adminUserId));
+    console.log("ℹ️  Superadmin user updated with fresh password");
   }
 
   // ── 4. Admin form permissions ─────────────────────────────────────────────

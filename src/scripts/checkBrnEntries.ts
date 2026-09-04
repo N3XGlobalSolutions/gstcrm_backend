@@ -9,7 +9,7 @@ async function main() {
         process.exit(0);
     }
 
-    const brn = accs[0];
+    const brn = accs[0]!;
     console.log("ACCOUNT brn:", brn);
 
     const groups = await db.select().from(entryGroups).where(eq(entryGroups.account_id, brn.id));

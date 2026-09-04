@@ -20,17 +20,19 @@ const authRouter = Router();
 const ACCESS_COOKIE = "access_token";
 const REFRESH_COOKIE = "refresh_token";
 
+const isProd = env.IS_PROD || env.NODE_ENV === "production";
+
 const accessCookieOptions = {
   httpOnly: true,
-  secure: env.IS_PROD,
-  sameSite: "lax" as const,
+  secure: isProd,
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
   path: "/",
 };
 
 const refreshCookieOptions = {
   httpOnly: true,
-  secure: env.IS_PROD,
-  sameSite: "lax" as const,
+  secure: isProd,
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
   path: "/api/auth",
 };
 

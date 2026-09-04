@@ -39,9 +39,14 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like same-origin requests)
+      // Allow requests with no origin (like same-origin requests or server-to-server)
       if (!origin) return callback(null, true);
       
+      // Allow any aarsanjewels.cloud domain/subdomain
+      if (origin.endsWith("aarsanjewels.cloud")) {
+        return callback(null, true);
+      }
+
       // In development, dynamically allow any localhost origin
       if (env.NODE_ENV === "development" && (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:"))) {
         return callback(null, true);
@@ -54,9 +59,9 @@ app.use(
       
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
-      } else {
-        return callback(new Error("Not allowed by CORS"));
       }
+
+      return callback(null, false);
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
