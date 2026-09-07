@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "accounts_type_name_unique" ON "accounts" USING btree ("type",lower(btrim("name"))) WHERE "accounts"."is_deleted" = false AND "accounts"."is_system_account" = false;

@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { accounts, entryGroups } from "@/db/schema";
-import { and, eq, ilike, count, sql, max, desc } from "drizzle-orm";
+import { and, eq, ne, ilike, count, sql, max, desc } from "drizzle-orm";
 import type { z } from "zod";
 import type { ListAccountsSchema } from "./schema";
 
@@ -88,6 +88,31 @@ export async function softDeleteAccount(id: string) {
     .update(accounts)
     .set({ is_deleted: true, updated_at: new Date() })
     .where(eq(accounts.id, id));
+}
+
+// ─── findAccountByName ───────────────────────────────────────────────────────
+// Case- and whitespace-insensitive name lookup within an account type, mirroring the
+// `accounts_type_name_unique` partial index. `excludeId` skips the row being updated.
+
+export async function findAccountByName(
+  name: string,
+  type: string,
+  excludeId?: string,
+) {
+  const conditions = [
+    eq(accounts.type, type as any),
+    eq(accounts.is_deleted, false),
+    eq(accounts.is_system_account, false),
+    sql`lower(btrim(${accounts.name})) = lower(btrim(${name}))`,
+  ];
+  if (excludeId) conditions.push(ne(accounts.id, excludeId));
+
+  const [row] = await db
+    .select({ id: accounts.id, name: accounts.name, entry_no: accounts.entry_no })
+    .from(accounts)
+    .where(and(...conditions))
+    .limit(1);
+  return row ?? null;
 }
 
 // ─── getNextAccountEntryNo ───────────────────────────────────────────────────

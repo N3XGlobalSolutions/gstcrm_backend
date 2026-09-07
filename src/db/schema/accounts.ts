@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -9,6 +10,7 @@ import {
   numeric,
   pgEnum,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
@@ -78,4 +80,10 @@ export const accounts = pgTable("accounts", {
     .notNull(),
 }, (table) => [
   unique("accounts_type_entry_no_unique").on(table.type, table.entry_no),
+  // Names are unique per account type, case- and whitespace-insensitive, so
+  // "Brn", "brn" and " Brn " cannot coexist as customers. Soft-deleted and system
+  // accounts are excluded, so deleting an account frees its name for reuse.
+  uniqueIndex("accounts_type_name_unique")
+    .on(table.type, sql`lower(btrim(${table.name}))`)
+    .where(sql`${table.is_deleted} = false AND ${table.is_system_account} = false`),
 ]);

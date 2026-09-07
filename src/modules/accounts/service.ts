@@ -7,6 +7,7 @@ import { toDecimal } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import type { z } from "zod";
 import { createSystemNotification } from "@/modules/notifications/service";
+import { syncAccountToRemote } from "@/lib/customerSync";
 import type {
   ListAccountsSchema,
   CreateAccountSchema,
@@ -23,6 +24,7 @@ import {
   updateAccount,
   softDeleteAccount,
   getNextAccountEntryNo,
+  findAccountByName,
 } from "./queries";
 import { entryGroups } from "@/db/schema";
 import { eq, and, isNotNull, desc, not } from "drizzle-orm";
@@ -47,12 +49,29 @@ export async function listAccounts(input: z.infer<typeof ListAccountsSchema>) {
   };
 }
 
+// ─── assertNameAvailable ──────────────────────────────────────────────────────
+// Enforced in the DB by the `accounts_type_name_unique` partial index; checked here
+// first so the user gets a clear 409 instead of a raw constraint violation.
+
+async function assertNameAvailable(name: string, type: string, excludeId?: string) {
+  const clash = await findAccountByName(name, type, excludeId);
+  if (clash) {
+    throw new AppError(
+      "CONFLICT",
+      `An account named "${clash.name}" already exists (entry no. ${clash.entry_no}). Names must be unique.`,
+      "name",
+    );
+  }
+}
+
 // ─── createAccount ────────────────────────────────────────────────────────────
 
 export async function createAccount(
   input: z.infer<typeof CreateAccountSchema>,
   creator: { id: string; username: string }
 ) {
+  await assertNameAvailable(input.name, input.type);
+
   // Wrap the whole creation in a single transaction so account insert, opening
   // balance entries, and sequence generation are all atomic.
   const account = await db.transaction(async (tx) => {
@@ -129,8 +148,7 @@ export async function createAccount(
     return newAccount;
   });
 
-  // Fire system notification AFTER the transaction commits, as a best-effort
-  // side-effect. Never let a notification failure roll back the customer creation.
+  // Fire system notification & sync customer AFTER the transaction commits, as best-effort side-effects
   if (input.type === "CUSTOMER") {
     createSystemNotification(
       db,
@@ -138,6 +156,10 @@ export async function createAccount(
       creator.id
     ).catch((err) =>
       console.error("Failed to create system notification for new customer:", err)
+    );
+
+    syncAccountToRemote(account).catch((err) =>
+      console.error("Failed to sync customer to peer remote:", err)
     );
   }
 
@@ -163,6 +185,8 @@ export async function updateAccountById(
       "Record was modified by another user. Please reload and try again.",
     );
   }
+
+  await assertNameAvailable(input.name, current.type, input.id);
 
   // Opening balance changes do NOT retroactively alter ledger entries — by design
   const updated = await updateAccount(input.id, {
@@ -190,6 +214,10 @@ export async function updateAccountById(
       creator.id
     ).catch((err) =>
       console.error("Failed to create system notification for customer update:", err)
+    );
+
+    syncAccountToRemote(updated).catch((err) =>
+      console.error("Failed to sync customer update to peer remote:", err)
     );
   }
 
@@ -223,6 +251,10 @@ export async function deleteAccount(
   await softDeleteAccount(input.id);
 
   if (account.type === "CUSTOMER") {
+    syncAccountToRemote({ ...account, is_deleted: true }).catch((err) =>
+      console.error("Failed to sync customer delete to peer remote:", err)
+    );
+
     createSystemNotification(
       db,
       `Customer '${account.name}' was deleted by ${creator.username}`,

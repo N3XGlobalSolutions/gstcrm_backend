@@ -9,6 +9,7 @@ import { logger } from "@/lib/logger";
 import { createContext } from "@/lib/context";
 import { appRouter } from "@/app.router";
 import authRouter from "@/modules/auth/router";
+import { syncRouter } from "@/routes/sync";
 import { globalErrorHandler } from "@/middlewares/errorHandler";
 import { env } from "@/config/env";
 import os from "os";
@@ -73,8 +74,9 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// ─── 4. Auth routes ───────────────────────────────────────────────────────────
+// ─── 4. Auth & Sync routes ───────────────────────────────────────────────────
 app.use("/api/auth", authRouter);
+app.use("/api/sync", syncRouter);
 
 // ─── 5. Health check (no auth required) ──────────────────────────────────────
 app.get("/api/health", (_req, res) => {
