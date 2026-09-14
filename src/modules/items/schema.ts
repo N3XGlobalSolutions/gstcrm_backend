@@ -15,7 +15,9 @@ export const CreateItemSchema = z.object({
   name: z.string().min(1).max(100),
   type: z.enum(["GOLD", "ORNAMENT"]), // MONEY is system-only
   unit: z.enum(["GRAM", "PIECE"]),    // RUPEE is system-only
-  touch: z.number().positive().optional(),
+  // Touch 0 is allowed — an item may carry no default touch, with the real touch
+  // typed per bill row. Only a negative touch is invalid.
+  touch: z.number().nonnegative().max(100).optional(),
 });
 
 // ─── items.update ─────────────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ export const CreateItemSchema = z.object({
 export const UpdateItemSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(100),
-  touch: z.number().positive().optional().nullable(),
+  touch: z.number().nonnegative().max(100).optional().nullable(),
 });
 
 // ─── items.delete ─────────────────────────────────────────────────────────────

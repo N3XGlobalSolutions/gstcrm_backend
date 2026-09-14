@@ -493,15 +493,24 @@ export async function createSale(
 ) {
   // Step 1 — Per-item wastage + pure calculations
   const processedItems = input.items.map((item) => {
-    if (item.wastage_mode === "PERCENT" && toDecimal(item.purity).lte(0)) {
+    // PERCENT wastage divides BY the purity (weight × wastage% ÷ touch), so a zero
+    // touch is only a problem when wastage is actually being applied. Touch 0 is a
+    // legitimate value on its own — the row just bills as zero pure — so guard on the
+    // division, not on the touch alone. Without this, every touch-0 row was rejected
+    // here purely because PERCENT is the grid's default mode, even with no wastage.
+    const hasPercentWastage =
+      item.wastage_mode === "PERCENT" && toDecimal(item.wastage_value || "0").gt(0);
+    if (hasPercentWastage && toDecimal(item.purity).lte(0)) {
       throw new AppError(
         "BUSINESS_RULE_VIOLATION",
-        "Purity must be greater than zero when using PERCENT wastage mode"
+        "Purity must be greater than zero when applying PERCENT wastage"
       );
     }
     const wastageQty =
       item.wastage_mode === "PERCENT"
-        ? calcWastagePercent(item.quantity, item.wastage_value, item.purity)
+        ? (hasPercentWastage
+            ? calcWastagePercent(item.quantity, item.wastage_value, item.purity)
+            : toDecimal("0"))
         : calcWastageGram(item.quantity, item.wastage_value);
 
     const totalQuantity = toDecimal(item.quantity).plus(wastageQty);
@@ -531,7 +540,22 @@ export async function createSale(
     const pureValuePure = processedItems.reduce((acc, item) => {
       return acc.plus(toDecimal(item.grossPureStr));
     }, toDecimal(0));
-    const pureValueCash = pureValuePure.mul(ratePerGram);
+    // Touch 0 = DIRECT sale: sold by weight at the bill rate, not by pure gold. Its
+    // value is (weight + wastage) × rate and it contributes no pure (grossPureStr is
+    // already 0). Without this the row billed as ₹0.
+    const directItems = processedItems.filter((item) => toDecimal(item.purity).isZero());
+    const directValueCash = directItems.reduce(
+      (acc, item) => acc.plus(toDecimal(item.totalQuantityStr).mul(ratePerGram)),
+      toDecimal(0),
+    );
+    const pureValueCash = pureValuePure.mul(ratePerGram).plus(directValueCash);
+
+    if (directItems.length > 0 && input.balance_mode !== "CASH") {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        "Direct sale items (touch 0) are valued in cash — set Maintain In to Cash",
+      );
+    }
 
     const discountCash = toDecimal(input.discount ?? "0");
     const discountPure = toDecimal(input.discount_pure ?? "0");

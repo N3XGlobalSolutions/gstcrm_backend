@@ -250,14 +250,30 @@ export async function createPurchase(
   // Amount actually displays (mirrors the identical fix in sales/service.ts).
   let totalPurchaseCashVal = toDecimal(0);
   let totalPureQty = toDecimal(0);
+  // Touch 0 = DIRECT purchase: the item is bought by weight at the typed rate, not
+  // by pure gold. Its value is weight × rate; it contributes no pure. A direct row is
+  // money, not gold, so a bill carrying one must be kept in Cash (checked below).
+  let hasDirectItems = false;
   allItems.forEach((item) => {
     const qty = toDecimal(item.quantity);
     const pur = toDecimal(item.purity);
-    const pure = toDecimal(toQuantityString(qty.times(pur).div(100)));
     const r = toDecimal(item.rate ?? input.rate_per_gram ?? '0');
+    if (pur.isZero()) {
+      hasDirectItems = true;
+      totalPurchaseCashVal = totalPurchaseCashVal.plus(qty.times(r));
+      return;
+    }
+    const pure = toDecimal(toQuantityString(qty.times(pur).div(100)));
     totalPurchaseCashVal = totalPurchaseCashVal.plus(pure.times(r));
     totalPureQty = totalPureQty.plus(pure);
   });
+
+  if (hasDirectItems && !isCashMode) {
+    throw new AppError(
+      "BUSINESS_RULE_VIOLATION",
+      "Direct purchase items (touch 0) are valued in cash — set Maintain In to Cash",
+    );
+  }
 
   // Overpayment guard removed by request — bank_amount is no longer capped
   // against the supplier's outstanding balance. A payment larger than what's
