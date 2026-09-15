@@ -127,6 +127,13 @@
       "when": 1788782779689,
       "tag": "0017_salty_the_enforcers",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789458358389,
+      "tag": "0018_bank_transactions",
+      "breakpoints": true
     }
   ]
 }

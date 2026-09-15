@@ -1,6 +1,7 @@
 import { router, publicProcedure } from "@/lib/trpc";
 import { itemsRouter } from "@/modules/items/router";
 import { accountsRouter } from "@/modules/accounts/router";
+import { bankRouter } from "@/modules/bank/router";
 import { purchaseRouter } from "@/modules/transactions/purchase/router";
 import { salesRouter } from "@/modules/transactions/sales/router";
 import { jobWorkRouter } from "@/modules/transactions/jobWork/router";
@@ -22,6 +23,7 @@ export const appRouter = router({
 
   items: itemsRouter,
   accounts: accountsRouter,
+  bank: bankRouter,
 
   transactions: router({
     purchase: purchaseRouter,
