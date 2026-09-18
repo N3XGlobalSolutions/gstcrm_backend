@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  # ── PostgreSQL Database Container for GST CRM ─────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: gstcrm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-gstcrm_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-gstcrm_secure_password_2026}
+      POSTGRES_DB: ${DB_NAME:-gstcrm_db}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    # Bind to host port 5433 (so it doesn't conflict with goldcrm-postgres on 5432)
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - gstcrm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    command: >
+      postgres
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c work_mem=16MB
+        -c min_wal_size=1GB
+        -c max_wal_size=4GB
+
+  # ── GST CRM Backend Container ─────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gstcrm-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PORT: 3002
+      NODE_ENV: production
+      # Internal Docker network connection to gstcrm-postgres
+      DATABASE_URL: postgresql://${DB_USER:-gstcrm_user}:${DB_PASSWORD:-gstcrm_secure_password_2026}@postgres:5432/${DB_NAME:-gstcrm_db}?sslmode=disable
+    ports:
+      - "127.0.0.1:3003:3002"
+
+volumes:
+  gstcrm_pgdata:
+    name: gstcrm_pgdata
