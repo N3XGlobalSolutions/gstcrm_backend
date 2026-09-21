@@ -53,12 +53,17 @@ export async function listAccounts(input: z.infer<typeof ListAccountsSchema>) {
 // Enforced in the DB by the `accounts_type_name_unique` partial index; checked here
 // first so the user gets a clear 409 instead of a raw constraint violation.
 
-async function assertNameAvailable(name: string, type: string, excludeId?: string) {
-  const clash = await findAccountByName(name, type, excludeId);
+async function assertNameAvailable(
+  name: string,
+  type: string,
+  excludeId?: string,
+  customerType?: string | null,
+) {
+  const clash = await findAccountByName(name, type, excludeId, customerType);
   if (clash) {
     throw new AppError(
       "CONFLICT",
-      `An account named "${clash.name}" already exists (entry no. ${clash.entry_no}). Names must be unique.`,
+      `An account named "${clash.name}" already exists in this category (entry no. ${clash.entry_no}). Names must be unique within a category.`,
       "name",
     );
   }
@@ -70,7 +75,7 @@ export async function createAccount(
   input: z.infer<typeof CreateAccountSchema>,
   creator: { id: string; username: string }
 ) {
-  await assertNameAvailable(input.name, input.type);
+  await assertNameAvailable(input.name, input.type, undefined, input.customer_type ?? null);
 
   // Wrap the whole creation in a single transaction so account insert, opening
   // balance entries, and sequence generation are all atomic.
@@ -186,7 +191,9 @@ export async function updateAccountById(
     );
   }
 
-  await assertNameAvailable(input.name, current.type, input.id);
+  // Checked against the role being saved, so moving an account to another role
+  // only clashes with a name already used in THAT role.
+  await assertNameAvailable(input.name, current.type, input.id, input.customer_type ?? null);
 
   // Opening balance changes do NOT retroactively alter ledger entries — by design
   const updated = await updateAccount(input.id, {

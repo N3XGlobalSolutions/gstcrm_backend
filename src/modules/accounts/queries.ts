@@ -91,19 +91,27 @@ export async function softDeleteAccount(id: string) {
 }
 
 // ─── findAccountByName ───────────────────────────────────────────────────────
-// Case- and whitespace-insensitive name lookup within an account type, mirroring the
-// `accounts_type_name_unique` partial index. `excludeId` skips the row being updated.
+// Case- and whitespace-insensitive name lookup within an account type AND role,
+// mirroring the `accounts_type_role_name_unique` partial index. One person often
+// trades in more than one role — the same "MJ" can be a Customer, a Purchaser and
+// a Goldsmith — so each role holds its own account and its own balance, and only a
+// repeat of the name inside the SAME role is a clash. `excludeId` skips the row
+// being updated.
 
 export async function findAccountByName(
   name: string,
   type: string,
   excludeId?: string,
+  customerType?: string | null,
 ) {
   const conditions = [
     eq(accounts.type, type as any),
     eq(accounts.is_deleted, false),
     eq(accounts.is_system_account, false),
     sql`lower(btrim(${accounts.name})) = lower(btrim(${name}))`,
+    // NULL never equals NULL in SQL, so both sides are coalesced — otherwise two
+    // role-less accounts of the same name would never be seen as a clash.
+    sql`coalesce(${accounts.customer_type}::text, '') = coalesce(${customerType ?? null}::text, '')`,
   ];
   if (excludeId) conditions.push(ne(accounts.id, excludeId));
 

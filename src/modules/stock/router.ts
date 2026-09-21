@@ -1,6 +1,6 @@
 import { router, protectedProcedure, guardedProcedure } from "@/lib/trpc";
 import { z } from "zod";
-import { getBalances, getLotBalances, getAccountLotBalances, getAccountItemBalances, getAllGoldsmithsLotBalances } from "@/lib/balance";
+import { getBalances, getLotBalances, getAccountLotBalances, getAccountItemBalances, getAccountItemTouchBalances, getAllGoldsmithsLotBalances } from "@/lib/balance";
 import { toDecimal, type Decimal } from "@/lib/decimal";
 import { db } from "@/db";
 import { items, accounts } from "@/db/schema";
@@ -131,11 +131,15 @@ export async function getGoldStock(input: { page: number; limit: number }) {
     .orderBy(items.entry_no);
 
   const goldItemIds = goldItems.map((item) => item.id);
-  // Pooled mode: sum all entries per item_id, ignoring lot_id
-  const itemBalances = await getAccountItemBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds);
+  // One row per item AND touch: the touch is typed by hand on each bill, so the
+  // same name bought at two touches is two stock lines, and buying the same name
+  // at the same touch adds to the line that is already there.
+  const itemBalances = await getAccountItemTouchBalances(SYSTEM_ACCOUNTS.SHOP_ID, goldItemIds);
 
   const flatItems = itemBalances
-    .filter((bal) => bal.quantity.gt(toDecimal("0")))
+    // A negative line means more was sold at that touch than was ever bought at
+    // it — kept visible rather than hidden, so the mistake can be corrected.
+    .filter((bal) => !bal.quantity.eq(toDecimal("0")))
     .map((bal) => {
       const item = goldItems.find((i) => i.id === bal.item_id)!;
       const qty = Number(bal.quantity);
@@ -143,7 +147,8 @@ export async function getGoldStock(input: { page: number; limit: number }) {
       const pureQty = bal.pure_quantity ? Number(bal.pure_quantity) : null;
       return {
         item,
-        lot_id: null as string | null,  // no lot in pooled mode
+        touch: bal.touch,
+        lot_id: null as string | null,  // gold carries no lot
         balance: isNaN(qty) ? '0.000' : bal.quantity.toFixed(3),
         purity: pur !== null && !isNaN(pur) ? bal.purity!.toFixed(2) : undefined,
         average_touch: bal.average_touch

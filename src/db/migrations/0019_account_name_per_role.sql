@@ -1,0 +1,3 @@
+DROP INDEX "accounts_type_name_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "accounts_type_role_name_unique" ON "accounts" USING btree ("type","customer_type",lower(btrim("name"))) WHERE "accounts"."is_deleted" = false AND "accounts"."is_system_account" = false AND "accounts"."customer_type" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "accounts_type_name_norole_unique" ON "accounts" USING btree ("type",lower(btrim("name"))) WHERE "accounts"."is_deleted" = false AND "accounts"."is_system_account" = false AND "accounts"."customer_type" IS NULL;

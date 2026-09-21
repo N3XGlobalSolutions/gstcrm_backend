@@ -530,6 +530,61 @@ export interface AccountItemBalance {
  * All purchases of "92 Pure Gold" become one pool regardless of when they were bought.
  * lot_id is still stored in entries for audit — this query simply ignores it.
  */
+/**
+ * Gold stock split by TOUCH: one row per (item, touch) instead of one pooled row
+ * per item. Gold is bought and sold at a hand-typed touch, so 91.60 and 75.00 of
+ * the same item name are different physical stock and must not be averaged into
+ * a single line. Buying the same name at the same touch adds to its existing row.
+ *
+ * Rows are keyed on the entry's own `purity`, so nothing new is stored — the
+ * split is derived from the ledger that already records each bill's touch.
+ */
+export async function getAccountItemTouchBalances(
+  accountId: string,
+  itemIds?: string[],
+  asOfDate?: Date,
+): Promise<(AccountItemBalance & { touch: string })[]> {
+  const rows = await db
+    .select({
+      item_id: entries.item_id,
+      touch: sql`COALESCE(${entries.purity}, 0)::text`,
+      net_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END)::text`,
+      net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} * COALESCE(${entries.purity}, 0) / 100 ELSE -(${entries.quantity} * COALESCE(${entries.purity}, 0) / 100) END)::text`,
+      created_at: sql`MIN(${entries.created_at})`,
+    })
+    .from(entries)
+    .where(
+      and(
+        or(
+          eq(entries.to_account_id, accountId),
+          eq(entries.from_account_id, accountId),
+        ),
+        itemIds && itemIds.length > 0 ? inArray(entries.item_id, itemIds) : undefined,
+        asOfDate ? lte(entries.created_at, asOfDate) : undefined,
+      )
+    )
+    .groupBy(entries.item_id, sql`COALESCE(${entries.purity}, 0)`)
+    .having(
+      sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} ELSE -${entries.quantity} END) != 0`
+    )
+    .orderBy(sql`MIN(${entries.created_at})`);
+
+  return rows.map((row) => {
+    const touch = toDecimal((row.touch as string) || "0");
+    return {
+      item_id: row.item_id!,
+      touch: touch.toFixed(2),
+      quantity: toDecimal(row.net_quantity as string),
+      // Every row in this grouping IS one touch, so purity and average touch are
+      // that same figure — there is nothing left to average.
+      purity: touch,
+      average_touch: touch,
+      pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity as string) : null,
+      created_at: new Date(row.created_at as string | Date),
+    };
+  });
+}
+
 export async function getAccountItemBalances(
   accountId: string,
   itemIds?: string[],

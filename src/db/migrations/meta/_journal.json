@@ -134,6 +134,13 @@
       "when": 1789458358389,
       "tag": "0018_bank_transactions",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1789991239445,
+      "tag": "0019_account_name_per_role",
+      "breakpoints": true
     }
   ]
 }

@@ -80,10 +80,25 @@ export const accounts = pgTable("accounts", {
     .notNull(),
 }, (table) => [
   unique("accounts_type_entry_no_unique").on(table.type, table.entry_no),
-  // Names are unique per account type, case- and whitespace-insensitive, so
-  // "Brn", "brn" and " Brn " cannot coexist as customers. Soft-deleted and system
-  // accounts are excluded, so deleting an account frees its name for reuse.
-  uniqueIndex("accounts_type_name_unique")
+  // Names are unique per account type AND role (customer_type), case- and
+  // whitespace-insensitive, so "Brn", "brn" and " Brn " cannot coexist as
+  // customers — but the same person CAN be a Customer, a Purchaser and a
+  // Goldsmith at once, each as its own account with its own balance.
+  // customer_type is coalesced because NULL never equals NULL in a unique index.
+  // Soft-deleted and system accounts are excluded, so deleting an account frees
+  // its name for reuse.
+  // Two partial indexes rather than one over coalesce(customer_type): casting an
+  // enum to text is not IMMUTABLE, so Postgres refuses it inside an index. The
+  // first covers accounts that have a role; the second covers role-less ones,
+  // which the first cannot guard because NULLs are all distinct to a unique index.
+  uniqueIndex("accounts_type_role_name_unique")
+    .on(table.type, table.customer_type, sql`lower(btrim(${table.name}))`)
+    .where(
+      sql`${table.is_deleted} = false AND ${table.is_system_account} = false AND ${table.customer_type} IS NOT NULL`,
+    ),
+  uniqueIndex("accounts_type_name_norole_unique")
     .on(table.type, sql`lower(btrim(${table.name}))`)
-    .where(sql`${table.is_deleted} = false AND ${table.is_system_account} = false`),
+    .where(
+      sql`${table.is_deleted} = false AND ${table.is_system_account} = false AND ${table.customer_type} IS NULL`,
+    ),
 ]);

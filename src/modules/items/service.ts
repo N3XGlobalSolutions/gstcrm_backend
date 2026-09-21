@@ -57,7 +57,9 @@ export async function updateItem(input: z.infer<typeof UpdateItemSchema>) {
     );
   }
 
-  return updateItemName(input.id, input.name, input.touch);
+  // Ornament items keep their master touch; a gold item no longer carries one, so
+  // only the name is updated here.
+  return updateItemName(input.id, input.name);
 }
 
 // ─── deleteItem ──────────────────────────────────────────────────────────────
