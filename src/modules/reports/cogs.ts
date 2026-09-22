@@ -30,7 +30,13 @@ export interface CostInEvent {
 export interface CostOutEvent {
   kind: "OUT";
   date: string; // YYYY-MM-DD
-  pure: string; // pure grams sold
+  /** Pure grams that physically LEFT the shop — weight × touch. This is what
+   *  inventory loses and what COGS is charged for. */
+  pure: string;
+  /** Pure grams the customer was BILLED for — (weight + wastage) × touch.
+   *  Wastage is billed but never handed over, so it is the shop's margin on the
+   *  sale. Defaults to `pure` when a bill carries no wastage. */
+  revenuePure?: string;
   rate: string; // ₹ per pure gram (sale price)
 }
 
@@ -96,7 +102,9 @@ export function computeWeightedAverageCogs(
       if (invPure.gt(0)) lastAvg = invCost.div(invPure);
 
       if (inWindow(ev.date)) {
-        revenue = revenue.plus(s.mul(toDecimal(ev.rate)));
+        // Billed grams earn the revenue; only the grams that left cost anything.
+        const billed = toDecimal(ev.revenuePure ?? ev.pure);
+        revenue = revenue.plus(billed.mul(toDecimal(ev.rate)));
         cogs = cogs.plus(lineCogs);
         pureSold = pureSold.plus(s);
       }
