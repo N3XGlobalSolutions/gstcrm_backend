@@ -1,4 +1,5 @@
 import { AppError } from "@/types/errors";
+import { assertDeletableLastBill } from "@/lib/deleteGuards";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
 import {
@@ -532,7 +533,12 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
 // ─── deleteLabourBill ─────────────────────────────────────────────────────────
 
 export async function deleteLabourBill(input: z.infer<typeof DeleteTxSchema>) {
-  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for labour bills");
+  // Only the party's most recent labour bill may go — see assertDeletableLastBill.
+  await assertDeletableLastBill(input.id, "LABOUR_BILL");
+  // Nothing is erased: the bill is reversed with an opposite entry group and then
+  // marked deleted, so the ledger still shows what happened and when.
+  await reverseEntryGroup(input.id);
+  return { success: true, id: input.id };
 }
 
 // ─── convertGoldToCash ────────────────────────────────────────────────────────

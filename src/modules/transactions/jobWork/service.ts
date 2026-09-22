@@ -1,4 +1,5 @@
 import { AppError } from "@/types/errors";
+import { assertDeletableLastBill } from "@/lib/deleteGuards";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
 import {
@@ -532,7 +533,12 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
 // ─── deleteJobWork ──────────────────────────────────────────────────────────
 
 export async function deleteJobWork(input: z.infer<typeof DeleteTxSchema>) {
-  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for job work");
+  // Only the party's most recent job work may go — see assertDeletableLastBill.
+  await assertDeletableLastBill(input.id, "JOB_WORK");
+  // Nothing is erased: the bill is reversed with an opposite entry group and then
+  // marked deleted, so the ledger still shows what happened and when.
+  await reverseEntryGroup(input.id);
+  return { success: true, id: input.id };
 }
 
 // ─── convertGoldToCash ────────────────────────────────────────────────────────

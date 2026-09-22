@@ -1,11 +1,28 @@
 import { initTRPC, TRPCError } from "@trpc/server";
+import { z, ZodError } from "zod";
+import { formatZodError } from "@/lib/validationMessage";
 import type { Context } from "./context";
 import { checkPermission } from "@/lib/permissions";
 
 export const t = initTRPC.context<Context>().create({
   errorFormatter({ shape, error }) {
     console.error("❌ tRPC Error:", error);
-    return shape;
+    // A validation failure otherwise reaches the screen as the raw ZodError
+    // array. Rewrite it into something the shop can act on — "PAN: Must be at
+    // most 10 characters" — and keep the per-field list for any form that
+    // wants to mark the boxes itself.
+    const readable = formatZodError(error);
+    if (!readable) return shape;
+    const zodError = (error as { cause?: unknown }).cause;
+    return {
+      ...shape,
+      message: readable,
+      data: {
+        ...shape.data,
+        fieldErrors:
+          zodError instanceof ZodError ? z.flattenError(zodError).fieldErrors : undefined,
+      },
+    };
   }
 });
 

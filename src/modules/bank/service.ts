@@ -9,8 +9,10 @@ import {
 } from "@/db/schema";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import { AppError } from "@/types/errors";
+import { upsertCompanyDetails } from "@/modules/settings/queries";
 import type {
   AddBankFundsInput,
+  SaveBanksInput,
   BankLedgerInput,
   TransferBankFundsInput,
 } from "./schema";
@@ -89,6 +91,32 @@ async function requireBank(bankKey: string): Promise<BankAccountConfig> {
     );
   }
   return bank;
+}
+
+/**
+ * Replaces the shop's bank list. Written back as the same JSON array Settings →
+ * Company Details reads, so both screens always show the same banks.
+ *
+ * Renaming a bank is safe for money already recorded: a bill's payment is matched
+ * to a bank by account number first (see matchBank), so the old entries follow the
+ * renamed bank. Changing an account NUMBER is what strands them — they then show
+ * under "Unassigned" rather than being silently attached to the wrong bank.
+ */
+export async function saveBanks(input: SaveBanksInput) {
+  const seen = new Set<string>();
+  for (const bank of input.banks) {
+    const key = buildBankKey(bank.bankName, bank.accountNo);
+    if (seen.has(key)) {
+      throw new AppError(
+        "CONFLICT",
+        `"${bank.bankName}" is listed twice with the same account number.`,
+      );
+    }
+    seen.add(key);
+  }
+
+  await upsertCompanyDetails({ bank_details: JSON.stringify(input.banks) });
+  return listBanks();
 }
 
 // ─── Ledger ───────────────────────────────────────────────────────────────────

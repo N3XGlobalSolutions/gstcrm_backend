@@ -38,6 +38,29 @@ export const AddBankFundsSchema = z.object({
 
 export type AddBankFundsInput = z.infer<typeof AddBankFundsSchema>;
 
+// The shop's own bank accounts, edited from the Bank page. They live in
+// company_details.bank_details (a JSON array) because the Purchase/Sales payment
+// dropdowns read them from there — one list, one source.
+export const SaveBanksSchema = z.object({
+  banks: z
+    .array(
+      z.object({
+        bankName: z.string().trim().min(1, "Bank name is required").max(200),
+        accountNo: z.string().trim().max(30).default(""),
+        ifscCode: z.string().trim().max(15).default(""),
+        branch: z.string().trim().max(200).default(""),
+        openingBalance: z
+          .string()
+          .trim()
+          .regex(/^-?\d*(\.\d{1,2})?$/, "Opening balance must be a number")
+          .default(""),
+      }),
+    )
+    .max(50),
+});
+
+export type SaveBanksInput = z.infer<typeof SaveBanksSchema>;
+
 // Money moved between two of the shop's own banks.
 export const TransferBankFundsSchema = z
   .object({

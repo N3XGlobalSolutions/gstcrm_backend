@@ -1,4 +1,5 @@
 import { AppError } from "@/types/errors";
+import { assertDeletableLastBill } from "@/lib/deleteGuards";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
 import { generateEntryGroupNo } from "@/lib/entryNoGenerator";
@@ -862,7 +863,12 @@ export async function deleteSale(
   input: z.infer<typeof DeleteTxSchema>,
   creator: { id: string; username: string }
 ) {
-  throw new AppError("BUSINESS_RULE_VIOLATION", "Delete option has been disabled for sales");
+  // Only the party's most recent sale may go — see assertDeletableLastBill.
+  await assertDeletableLastBill(input.id, "SALE");
+  // Nothing is erased: the bill is reversed with an opposite entry group and then
+  // marked deleted, so the ledger still shows what happened and when.
+  await reverseEntryGroup(input.id);
+  return { success: true, id: input.id };
 }
 
 export async function updateGSTConversion(
