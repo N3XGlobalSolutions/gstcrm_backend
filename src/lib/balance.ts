@@ -573,7 +573,9 @@ export async function getAccountItemTouchBalances(
     const touch = toDecimal((row.touch as string) || "0");
     return {
       item_id: row.item_id!,
-      touch: touch.toFixed(2),
+      // 3 decimals, matching the master touch column: at 2 a 99.999 purchase
+      // reads as 100.00 and looks like it landed in the wrong stock line.
+      touch: touch.toFixed(3),
       quantity: toDecimal(row.net_quantity as string),
       // Every row in this grouping IS one touch, so purity and average touch are
       // that same figure — there is nothing left to average.

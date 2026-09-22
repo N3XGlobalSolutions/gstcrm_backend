@@ -150,10 +150,12 @@ export async function getGoldStock(input: { page: number; limit: number }) {
         touch: bal.touch,
         lot_id: null as string | null,  // gold carries no lot
         balance: isNaN(qty) ? '0.000' : bal.quantity.toFixed(3),
-        purity: pur !== null && !isNaN(pur) ? bal.purity!.toFixed(2) : undefined,
+        // 3 decimals: gold stock is held per touch, and a 99.999 purchase must
+        // not read as 100.00 in the row that represents it.
+        purity: pur !== null && !isNaN(pur) ? bal.purity!.toFixed(3) : undefined,
         average_touch: bal.average_touch
-          ? bal.average_touch.toFixed(2)
-          : (pur !== null && !isNaN(pur) ? bal.purity!.toFixed(2) : undefined),
+          ? bal.average_touch.toFixed(3)
+          : (pur !== null && !isNaN(pur) ? bal.purity!.toFixed(3) : undefined),
         pure_balance: pureQty !== null && !isNaN(pureQty) ? bal.pure_quantity!.toFixed(3) : undefined,
         created_at: bal.created_at,
       };
