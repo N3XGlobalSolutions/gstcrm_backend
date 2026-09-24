@@ -209,8 +209,25 @@ export async function getOrnamentStock(input: { page: number; limit: number }) {
 
   // Newest purchases first — so page 1 always shows the latest stock
   flatLots.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+
+  // Totals across ALL in-stock lots (not just this page) for the summary cards.
+  let totalWeight = toDecimal("0");
+  let totalPure = toDecimal("0");
+  for (const lot of positiveLots) {
+    totalWeight = totalWeight.plus(lot.quantity);
+    if (lot.pure_quantity) totalPure = totalPure.plus(lot.pure_quantity);
+  }
+  const totals = {
+    lots: positiveLots.length,
+    items: new Set(positiveLots.map((lot) => lot.item_id)).size,
+    weight: totalWeight.toFixed(3),
+    pure: totalPure.toFixed(3),
+    // Weighted average touch = total pure ÷ total weight.
+    avg_touch: totalWeight.gt(0) ? totalPure.div(totalWeight).mul(100).toFixed(2) : "0.00",
+  };
+
   const offset = (input.page - 1) * input.limit;
-  return { data: flatLots.slice(offset, offset + input.limit), total: flatLots.length };
+  return { data: flatLots.slice(offset, offset + input.limit), total: flatLots.length, totals };
 }
 
 async function getMcGoldStock() {
