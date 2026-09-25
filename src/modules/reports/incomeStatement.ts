@@ -129,22 +129,23 @@ export async function getIncomeStatement(input: IncomeStatementInput) {
       FROM entries e JOIN entry_groups g ON e.group_id = g.id
       WHERE g.is_deleted = false AND g.type = 'LABOUR_BILL' ${period}`),
 
-    // Wastage billed on sales — grams charged but never handed over. Reported
+    // Wastage billed on sales, in PURE grams (wastage × touch/100; touch-0 direct
+    // rows stay gross, as they are sold by weight). Grams charged but never handed over. Reported
     // on its own so the shop can see where the sale margin came from; it is
     // already inside sales revenue above, so it is NOT added again.
     db.execute<{ grams: string | null; value: string | null }>(sql`
-      SELECT COALESCE(SUM(e.wastage_quantity), 0)::text AS grams,
-             COALESCE(SUM(e.wastage_quantity * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS value
+      SELECT COALESCE(SUM(CASE WHEN COALESCE(e.purity, 0) > 0 THEN e.wastage_quantity * e.purity / 100 ELSE e.wastage_quantity END), 0)::text AS grams,
+             COALESCE(SUM(CASE WHEN COALESCE(e.purity, 0) > 0 THEN e.wastage_quantity * e.purity / 100 ELSE e.wastage_quantity END * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS value
       FROM entries e JOIN entry_groups g ON e.group_id = g.id JOIN items i ON e.item_id = i.id
       WHERE g.is_deleted = false AND g.type = 'SALE'
         AND i.type IN ('GOLD', 'ORNAMENT') AND e.from_account_id = ${SHOP} ${period}`),
 
-    // Labour income = wastage grams on Ornament Issue rows (SHOP → goldsmith) ×
+    // Labour income = PURE wastage grams on Ornament Issue rows (SHOP → goldsmith) ×
     // the bill's rate. Exactly the sales rule: the metal is a pass-through, the
     // wastage charged on top of it is what the shop earns.
     db.execute<{ grams: string | null; value: string | null }>(sql`
-      SELECT COALESCE(SUM(e.wastage_quantity), 0)::text AS grams,
-             COALESCE(SUM(e.wastage_quantity * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS value
+      SELECT COALESCE(SUM(CASE WHEN COALESCE(e.purity, 0) > 0 THEN e.wastage_quantity * e.purity / 100 ELSE e.wastage_quantity END), 0)::text AS grams,
+             COALESCE(SUM(CASE WHEN COALESCE(e.purity, 0) > 0 THEN e.wastage_quantity * e.purity / 100 ELSE e.wastage_quantity END * COALESCE(e.rate, g.rate_per_gram, 0)), 0)::text AS value
       FROM entries e JOIN entry_groups g ON e.group_id = g.id JOIN items i ON e.item_id = i.id
       WHERE g.is_deleted = false AND g.type = 'LABOUR_BILL'
         AND i.type = 'ORNAMENT' AND e.from_account_id = ${SHOP} ${period}`),
