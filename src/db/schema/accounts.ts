@@ -47,6 +47,10 @@ export const accounts = pgTable("accounts", {
   state_code: varchar("state_code", { length: 10 }),
   place_of_supply: varchar("place_of_supply", { length: 100 }),
   address: text("address"),
+  // KYC / location details — mandatory for CUSTOMER accounts (enforced in the service)
+  aadhaar_no: varchar("aadhaar_no", { length: 12 }),
+  pincode: varchar("pincode", { length: 6 }),
+  location: varchar("location", { length: 200 }),
   phone: varchar("phone", { length: 15 }),
   email: varchar("email", { length: 200 }),
   website: varchar("website", { length: 200 }),

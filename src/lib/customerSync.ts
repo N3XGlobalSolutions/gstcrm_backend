@@ -23,6 +23,9 @@ export interface SyncAccountPayload {
   state_code?: string | null;
   place_of_supply?: string | null;
   address?: string | null;
+  aadhaar_no?: string | null;
+  pincode?: string | null;
+  location?: string | null;
   phone?: string | null;
   email?: string | null;
   website?: string | null;

@@ -69,12 +69,36 @@ async function assertNameAvailable(
   }
 }
 
+// ─── assertCustomerKyc ────────────────────────────────────────────────────────
+// Aadhaar, PAN, pin code and location are mandatory on every customer account
+// (Customer, Purchaser and Mc Customer). Format is checked by the Zod schema.
+
+function assertCustomerKyc(input: {
+  aadhaar_no?: string | null;
+  pan_no?: string | null;
+  pincode?: string | null;
+  location?: string | null;
+}) {
+  const required: [keyof typeof input, string][] = [
+    ["aadhaar_no", "Aadhaar No"],
+    ["pan_no", "PAN No"],
+    ["pincode", "Pin Code"],
+    ["location", "Location"],
+  ];
+  for (const [field, label] of required) {
+    if (!input[field]?.trim()) {
+      throw new AppError("VALIDATION_ERROR", `${label} is required for customers`, field);
+    }
+  }
+}
+
 // ─── createAccount ────────────────────────────────────────────────────────────
 
 export async function createAccount(
   input: z.infer<typeof CreateAccountSchema>,
   creator: { id: string; username: string }
 ) {
+  if (input.type === "CUSTOMER") assertCustomerKyc(input);
   await assertNameAvailable(input.name, input.type, undefined, input.customer_type ?? null);
 
   // Wrap the whole creation in a single transaction so account insert, opening
@@ -93,6 +117,9 @@ export async function createAccount(
       state_code: input.state_code ?? (input.type === "CUSTOMER" ? "33" : null),
       place_of_supply: input.place_of_supply ?? (input.type === "CUSTOMER" && input.customer_type !== "GOLD_SMITH" ? "Tamil Nadu" : null),
       address: input.address ?? null,
+      aadhaar_no: input.aadhaar_no ?? null,
+      pincode: input.pincode ?? null,
+      location: input.location ?? null,
       phone: input.phone ?? null,
       email: input.email ?? null,
       website: input.website ?? null,
@@ -193,6 +220,7 @@ export async function updateAccountById(
 
   // Checked against the role being saved, so moving an account to another role
   // only clashes with a name already used in THAT role.
+  if (current.type === "CUSTOMER") assertCustomerKyc(input);
   await assertNameAvailable(input.name, current.type, input.id, input.customer_type ?? null);
 
   // Opening balance changes do NOT retroactively alter ledger entries — by design
@@ -204,6 +232,9 @@ export async function updateAccountById(
     state_code: input.state_code ?? null,
     place_of_supply: input.place_of_supply ?? null,
     address: input.address ?? null,
+    aadhaar_no: input.aadhaar_no ?? null,
+    pincode: input.pincode ?? null,
+    location: input.location ?? null,
     phone: input.phone ?? null,
     email: input.email ?? null,
     website: input.website ?? null,

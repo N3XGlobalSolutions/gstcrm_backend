@@ -65,6 +65,9 @@ syncRouter.post("/account", async (req: Request, res: Response): Promise<void> =
             state_code = ${payload.state_code ?? null},
             place_of_supply = ${payload.place_of_supply ?? null},
             address = ${payload.address ?? null},
+            aadhaar_no = ${payload.aadhaar_no ?? null},
+            pincode = ${payload.pincode ?? null},
+            location = ${payload.location ?? null},
             phone = ${payload.phone ?? null},
             email = ${payload.email ?? null},
             website = ${payload.website ?? null},
@@ -88,13 +91,15 @@ syncRouter.post("/account", async (req: Request, res: Response): Promise<void> =
       await tx.execute(sql`
         INSERT INTO accounts (
           id, entry_no, name, type, customer_type, gst_no, pan_no, state_code,
-          place_of_supply, address, phone, email, website, bank_name, bank_account_no,
-          ifsc_code, default_tds_percent, default_tcs_percent, opening_pure_balance,
-          opening_cash_balance, is_system_account, is_deleted
+          place_of_supply, address, aadhaar_no, pincode, location, phone, email, website,
+          bank_name, bank_account_no, ifsc_code, default_tds_percent, default_tcs_percent,
+          opening_pure_balance, opening_cash_balance, is_system_account, is_deleted
         ) VALUES (
           ${payload.id}, ${entry_no}, ${payload.name}, ${payload.type}, ${payload.customer_type ?? null},
           ${payload.gst_no ?? null}, ${payload.pan_no ?? null}, ${payload.state_code ?? null},
-          ${payload.place_of_supply ?? null}, ${payload.address ?? null}, ${payload.phone ?? null},
+          ${payload.place_of_supply ?? null}, ${payload.address ?? null},
+          ${payload.aadhaar_no ?? null}, ${payload.pincode ?? null}, ${payload.location ?? null},
+          ${payload.phone ?? null},
           ${payload.email ?? null}, ${payload.website ?? null}, ${payload.bank_name ?? null},
           ${payload.bank_account_no ?? null}, ${payload.ifsc_code ?? null},
           ${payload.default_tds_percent ?? null}, ${payload.default_tcs_percent ?? null},

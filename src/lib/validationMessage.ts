@@ -20,6 +20,8 @@ const FIELD_LABELS: Record<string, string> = {
   pan_no: "PAN",
   pan_number: "PAN",
   ifsc_code: "IFSC code",
+  aadhaar_no: "Aadhaar",
+  pincode: "Pin code",
   hsn_code: "HSN / SAC",
   sac_code: "HSN / SAC",
   bill_no: "Bill no",
