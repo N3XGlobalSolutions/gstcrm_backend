@@ -9,6 +9,7 @@ import { db } from "@/db";
 import { entries as entriesTable, items as itemsTable, gstPurchaseHistory, accounts, entryGroups } from "@/db/schema";
 import { inArray, eq, desc, count, and, not, isNotNull, sql } from "drizzle-orm";
 import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
+import { getPartyAverages } from "@/modules/reports/goodsValue";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -99,8 +100,15 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     .limit(1);
   const globalLastBillId = globalLastBill?.id;
 
+  // Current-year average bill value per supplier — one batched lookup for the page.
+  const partyAverages = await getPartyAverages(
+    "PURCHASE",
+    enrichedData.map((d) => d.group.account_id),
+  );
+
   const finalEnrichedData = enrichedData.map((d) => {
     const opening = batchBalances[d.group.id]!;
+    const avg = partyAverages.get(d.group.account_id);
 
     // openingPure: prior net pure grams owed (negated — positive = shop owes supplier)
     const openingPureNum = -parseFloat(opening.balancePure.toString() || "0");
@@ -112,6 +120,11 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
 
     return {
       ...d,
+      group: {
+        ...d.group,
+        party_avg_amount: avg?.avg_amount ?? "0.00",
+        party_bill_count: avg?.bill_count ?? 0,
+      },
       openingPure: openingPureNum.toFixed(4),
       openingCash: openingCashNum.toFixed(2),
       isConverted: d.isConverted,
@@ -299,6 +312,16 @@ export async function createPurchase(
       purity: item.purity,
       rate: item.rate ?? input.rate_per_gram,
       pureQuantity: isCashMode ? "0" : undefined,
+      // Wastage % is stored for reference/reload only — no calculation uses it yet.
+      // wastageQuantity "0" is passed explicitly so entryBuilder does NOT derive a
+      // wastage_quantity from the % (which would also shift average_touch).
+      ...(item.wastage_percent !== undefined && item.wastage_percent !== ""
+        ? {
+            wastageMode: "PERCENT" as const,
+            wastageValue: item.wastage_percent,
+            wastageQuantity: "0",
+          }
+        : {}),
     })),
     // In CASH mode: record the cash value of the purchase as a cash charge from the supplier to shop.
     // Direction: supplier → SHOP (same as gold entries), so Supplier ledger registers cash outflow.

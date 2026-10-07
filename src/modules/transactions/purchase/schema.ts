@@ -28,6 +28,12 @@ const PurchaseItemSchema = z.object({
   quantity: positiveDecimalSchema,
   purity: puritySchema,
   rate: positiveDecimalSchema.optional(),
+  // Ornament-only "Wastage %" — stored on the entry for reference/reload only.
+  // It does NOT affect any calculation yet (formula pending).
+  wastage_percent: z.string().refine(v => {
+    const w = parseFloat(v);
+    return !isNaN(w) && w >= 0 && w <= 100;
+  }, "Wastage % must be between 0 and 100").optional(),
 });
 
 export const CreatePurchaseSchema = z.object({

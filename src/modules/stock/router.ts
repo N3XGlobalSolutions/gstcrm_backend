@@ -86,7 +86,10 @@ async function getSummary() {
       }
     }
   }
-  const ornaments_in_stock = Array.from(ornamentBalances.values()).filter((b) => b.gt(zero)).length;
+  const inStockOrnamentLots = Array.from(ornamentBalances.values()).filter((b) => b.gt(zero));
+  const ornaments_in_stock = inStockOrnamentLots.length;
+  // Gross weight of those same in-stock lots (the Stock page's "Ornaments" card).
+  const ornaments_weight = inStockOrnamentLots.reduce((sum, b) => sum.plus(b), zero);
 
   // 3. MC Gold Total
   let mc_gold_total = zero;
@@ -113,6 +116,7 @@ async function getSummary() {
   return {
     gold_total_pure: gold_total_pure.toFixed(3),
     ornaments_in_stock,
+    ornaments_weight: ornaments_weight.toFixed(3),
     mc_gold_total: mc_gold_total.toFixed(3),
     // net_gold_movement is the honest name; profit_loss_pure kept as an alias for
     // backward compatibility with the existing frontend until Phase 4 rewires it.
@@ -628,7 +632,59 @@ async function getExportData() {
   };
 }
 
+// ─── stock.getJobWorkTotals ───────────────────────────────────────────────────
+
+/**
+ * Pure gold issued to / received back from job workers in a date range.
+ * Out = SHOP → party, In = party → SHOP, on non-deleted JOB_WORK bills, gold and
+ * ornament lines only (money lines — incl. "Cash conversion:" — are excluded),
+ * skipping Gold↔Cash conversion groups. Pure = stored pure_quantity, else
+ * quantity × purity / 100 (same basis as reports/service.ts).
+ */
+async function getJobWorkTotals(input: { from_date: string; to_date: string }) {
+  const { entries: entriesTable, entryGroups } = await import("@/db/schema");
+  const { sql, gte, lte, inArray } = await import("drizzle-orm");
+
+  const shop = SYSTEM_ACCOUNTS.SHOP_ID;
+  const pureExpr = sql`COALESCE(NULLIF(${entriesTable.pure_quantity}, 0), ${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100)`;
+
+  const [row] = await db
+    .select({
+      out_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entriesTable.from_account_id} = ${shop} THEN ${pureExpr} ELSE 0 END), 0)::text`,
+      in_pure: sql<string>`COALESCE(SUM(CASE WHEN ${entriesTable.to_account_id} = ${shop} THEN ${pureExpr} ELSE 0 END), 0)::text`,
+    })
+    .from(entriesTable)
+    .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
+    .innerJoin(items, eq(entriesTable.item_id, items.id))
+    .where(
+      and(
+        eq(entryGroups.type, "JOB_WORK"),
+        eq(entryGroups.is_deleted, false),
+        gte(entryGroups.date, input.from_date),
+        lte(entryGroups.date, input.to_date),
+        inArray(items.type, ["GOLD", "ORNAMENT"]),
+        sql`COALESCE(${entryGroups.remarks}, '') NOT LIKE 'Gold to Cash Conversion%'`,
+        sql`COALESCE(${entryGroups.remarks}, '') NOT LIKE 'Cash to Gold Conversion%'`,
+        sql`COALESCE(${entriesTable.remarks}, '') NOT LIKE 'Cash conversion:%'`
+      )
+    );
+
+  const outPure = toDecimal(row?.out_pure || "0");
+  const inPure = toDecimal(row?.in_pure || "0");
+
+  return {
+    out_pure: outPure.toFixed(3),
+    in_pure: inPure.toFixed(3),
+    balance_pure: outPure.minus(inPure).toFixed(3),
+  };
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
+
+const JobWorkTotalsSchema = z.object({
+  from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+  to_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+});
 
 const PageSchema = z.object({
   page: z.number().int().min(1).default(1),
@@ -643,6 +699,7 @@ const IncomeStatementSchema = z.object({
 
 export const stockRouter = router({
   getSummary: protectedProcedure.query(async () => getSummary()),
+  getJobWorkTotals: protectedProcedure.input(JobWorkTotalsSchema).query(async ({ input }) => getJobWorkTotals(input)),
   getGoldStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getGoldStock(input)),
   getOrnamentStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getOrnamentStock(input)),
   getMcGoldStock: protectedProcedure.query(async () => getMcGoldStock()),

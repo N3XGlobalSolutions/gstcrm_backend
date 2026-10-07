@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { generateBillNo } from "@/lib/transactionQueries";
+import { getPartyAverage } from "@/modules/reports/goodsValue";
 import {
   ListTxSchema,
   GetByIdSchema,
@@ -65,4 +66,7 @@ export const salesRouter = router({
   getPaymentStatus: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getSalePaymentStatus(input)),
   settlePayment: guardedProcedure("sales", "sales", "edit").input(SettleSalePaymentSchema).mutation(async ({ input }) => settleSalePayment(input)),
   getGSTConversion: guardedProcedure("sales", "sales", "view").input(GetByIdSchema).query(async ({ input }) => getGSTSaleConversion(input.id)),
+  getPartyAverage: guardedProcedure("sales", "sales", "view")
+    .input(z.object({ account_id: z.string().uuid() }))
+    .query(async ({ input }) => getPartyAverage("SALE", input.account_id)),
 });

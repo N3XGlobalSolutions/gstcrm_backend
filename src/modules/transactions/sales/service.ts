@@ -21,6 +21,7 @@ import { entries, entries as entriesTable, items as itemsTable, accounts, entryG
 import { sql, inArray, eq, desc, count, not, isNotNull, and } from "drizzle-orm";
 import { createSystemNotification } from "@/modules/notifications/service";
 import { getAggregateBalances, getBatchAggregateBalances } from "@/lib/balance";
+import { getPartyAverages } from "@/modules/reports/goodsValue";
 import type { z } from "zod";
 import type {
   ListTxSchema,
@@ -112,11 +113,23 @@ export async function listSales(input: z.infer<typeof ListTxSchema>) {
     .limit(1);
   const globalLastBillId = globalLastBill?.id;
 
+  // Current-year average bill value per customer — one batched lookup for the page.
+  const partyAverages = await getPartyAverages(
+    "SALE",
+    enrichedData.map((d) => d.group.account_id),
+  );
+
   const finalEnrichedData = enrichedData.map((d) => {
     const opening = batchBalances[d.group.id]!;
+    const avg = partyAverages.get(d.group.account_id);
 
     return {
       ...d,
+      group: {
+        ...d.group,
+        party_avg_amount: avg?.avg_amount ?? "0.00",
+        party_bill_count: avg?.bill_count ?? 0,
+      },
       // openingPure = rate-stable balance before this bill (pure grams).
       // balancePure = totalPure − Σ(prior_payment / prior_rate) — never affected by rate changes.
       openingPure: opening.totalPure.toFixed(4),

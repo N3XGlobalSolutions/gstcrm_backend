@@ -12,4 +12,5 @@ export * from "./gst-purchase-history";
 export * from "./labour-bill-cycles";
 export * from "./job-work-cycles";
 export * from "./bank-transactions";
+export * from "./melting";
 
