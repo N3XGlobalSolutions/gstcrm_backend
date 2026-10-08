@@ -9,6 +9,7 @@ import { SYSTEM_ACCOUNTS } from "@/config/constants";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { getIncomeStatement } from "@/modules/reports/incomeStatement";
 import { TRPCError } from "@trpc/server";
+import { getMeltingTotals } from "@/modules/melting/service";
 
 // ─── stock.getSummary ─────────────────────────────────────────────────────────
 
@@ -679,6 +680,84 @@ async function getJobWorkTotals(input: { from_date: string; to_date: string }) {
   };
 }
 
+// ─── stock.getStockMovement ───────────────────────────────────────────────────
+
+/**
+ * Shop stock movement (gold + ornament) in a date range — the Stock page's
+ * "Net Gold Movement" card. IN = lines TO the shop, OUT = lines FROM the shop,
+ * GOLD/ORNAMENT items only (MONEY excluded, which also drops the money-only
+ * Gold↔Cash conversion groups and "Cash conversion:" lines).
+ *
+ * Deletes / edits: stock balances (lib/balance.ts) sum every entry, so a
+ * reversed bill contributes its original AND its REVERSAL group (same date,
+ * from/to swapped) — net zero. Here we skip both (is_deleted originals and
+ * REVERSAL groups), exactly like reports getStockReport, so In − Out still
+ * equals the stock change while the in/out columns don't show movements that
+ * never happened. Pure = stored pure_quantity, else quantity × purity / 100
+ * (same basis as getJobWorkTotals).
+ */
+async function getStockMovement(input: { from_date: string; to_date: string }) {
+  const { entries: entriesTable, entryGroups } = await import("@/db/schema");
+  const { sql, gte, lte, ne, inArray } = await import("drizzle-orm");
+
+  const shop = SYSTEM_ACCOUNTS.SHOP_ID;
+  // Same pure formula as the stock balances (quantity × purity), so Net always equals
+  // the change in the Gold / Ornament stock totals over the same period.
+  const pureExpr = sql`${entriesTable.quantity} * COALESCE(${entriesTable.purity}, 0) / 100`;
+  const isIn = sql`${entriesTable.to_account_id} = ${shop}`;
+  const isOut = sql`${entriesTable.from_account_id} = ${shop}`;
+
+  const rows = await db
+    .select({
+      type: entryGroups.type,
+      in_pure: sql<string>`COALESCE(SUM(CASE WHEN ${isIn} THEN ${pureExpr} ELSE 0 END), 0)::text`,
+      out_pure: sql<string>`COALESCE(SUM(CASE WHEN ${isOut} THEN ${pureExpr} ELSE 0 END), 0)::text`,
+      in_weight: sql<string>`COALESCE(SUM(CASE WHEN ${isIn} THEN ${entriesTable.quantity} ELSE 0 END), 0)::text`,
+      out_weight: sql<string>`COALESCE(SUM(CASE WHEN ${isOut} THEN ${entriesTable.quantity} ELSE 0 END), 0)::text`,
+    })
+    .from(entriesTable)
+    .innerJoin(entryGroups, eq(entriesTable.group_id, entryGroups.id))
+    .innerJoin(items, eq(entriesTable.item_id, items.id))
+    .where(
+      and(
+        eq(entryGroups.is_deleted, false),
+        ne(entryGroups.type, "REVERSAL"),
+        gte(entryGroups.date, input.from_date),
+        lte(entryGroups.date, input.to_date),
+        inArray(items.type, ["GOLD", "ORNAMENT"]),
+        or(eq(entriesTable.to_account_id, shop), eq(entriesTable.from_account_id, shop))
+      )
+    )
+    .groupBy(entryGroups.type);
+
+  const zero = toDecimal("0");
+  let inPure = zero;
+  let outPure = zero;
+  let inWeight = zero;
+  let outWeight = zero;
+  const byType: { type: string; in_pure: string; out_pure: string }[] = [];
+
+  for (const r of rows) {
+    const ip = toDecimal(r.in_pure || "0");
+    const op = toDecimal(r.out_pure || "0");
+    inPure = inPure.plus(ip);
+    outPure = outPure.plus(op);
+    inWeight = inWeight.plus(toDecimal(r.in_weight || "0"));
+    outWeight = outWeight.plus(toDecimal(r.out_weight || "0"));
+    byType.push({ type: String(r.type), in_pure: ip.toFixed(3), out_pure: op.toFixed(3) });
+  }
+  byType.sort((a, b) => a.type.localeCompare(b.type));
+
+  return {
+    in_pure: inPure.toFixed(3),
+    out_pure: outPure.toFixed(3),
+    net_pure: inPure.minus(outPure).toFixed(3),
+    in_weight: inWeight.toFixed(3),
+    out_weight: outWeight.toFixed(3),
+    by_type: byType,
+  };
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 const JobWorkTotalsSchema = z.object({
@@ -700,6 +779,10 @@ const IncomeStatementSchema = z.object({
 export const stockRouter = router({
   getSummary: protectedProcedure.query(async () => getSummary()),
   getJobWorkTotals: protectedProcedure.input(JobWorkTotalsSchema).query(async ({ input }) => getJobWorkTotals(input)),
+  // Melting in/out/loss over a date range (same date-range input as job work).
+  getMeltingTotals: protectedProcedure.input(JobWorkTotalsSchema).query(async ({ input }) => getMeltingTotals(input)),
+  // Shop gold+ornament stock IN/OUT/net over a date range ("Net Gold Movement" card).
+  getStockMovement: protectedProcedure.input(JobWorkTotalsSchema).query(async ({ input }) => getStockMovement(input)),
   getGoldStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getGoldStock(input)),
   getOrnamentStock: protectedProcedure.input(PageSchema).query(async ({ input }) => getOrnamentStock(input)),
   getMcGoldStock: protectedProcedure.query(async () => getMcGoldStock()),

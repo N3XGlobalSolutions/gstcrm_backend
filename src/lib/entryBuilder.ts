@@ -27,7 +27,8 @@ type EntryGroupType =
   | "LABOUR_BILL"
   | "EXPENSE"
   | "OPENING"
-  | "REVERSAL";
+  | "REVERSAL"
+  | "MELTING";
 
 type WastageMode = "PERCENT" | "GRAM";
 

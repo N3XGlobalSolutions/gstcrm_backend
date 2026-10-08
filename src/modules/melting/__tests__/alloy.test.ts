@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { computeAlloy } from "../alloy";
+import { computeAlloy, computeMeltLoss } from "../alloy";
 
 const A = "00000000-0000-0000-0000-00000000000a";
 const B = "00000000-0000-0000-0000-00000000000b";
@@ -71,5 +71,41 @@ describe("computeAlloy", () => {
     expect(r.current_weight).toBe("20.000");
     expect(r.current_pure).toBe("10.000");
     expect(r.current_touch).toBe("50.00");
+  });
+});
+
+describe("computeMeltLoss", () => {
+  it("uses current touch and current weight when no required touch", () => {
+    const r = computeMeltLoss(
+      [
+        { weight: "50", touch: "99.5" },
+        { weight: "50", touch: "91.6" },
+      ],
+      null,
+      [],
+      "99.2",
+    );
+    expect(r.expected_weight).toBe("100.000");
+    expect(r.out_touch).toBe("95.55");
+    expect(r.loss_weight).toBe("0.800");
+    expect(r.pure_out).toBe("94.786");
+    expect(r.pure_loss).toBe("0.764");
+  });
+
+  it("adds alloy weight to expected and melts out at required touch", () => {
+    const r = computeMeltLoss([{ weight: "100", touch: "99.5" }], "91.6", [{ metal_id: A, share_percent: "100" }], "108.5");
+    // final = 99.5 * 100 / 91.6 = 108.624 → alloy 8.624
+    expect(r.alloy_total).toBe("8.624");
+    expect(r.expected_weight).toBe("108.624");
+    expect(r.out_touch).toBe("91.60");
+    expect(r.loss_weight).toBe("0.124");
+    expect(r.pure_out).toBe("99.386");
+    expect(r.pure_loss).toBe("0.114");
+  });
+
+  it("allows a negative loss (gain)", () => {
+    const r = computeMeltLoss([{ weight: "10", touch: "90" }], null, [], "10.5");
+    expect(r.loss_weight).toBe("-0.500");
+    expect(r.pure_loss).toBe("-0.450");
   });
 });

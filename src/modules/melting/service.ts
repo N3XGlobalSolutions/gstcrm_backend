@@ -1,9 +1,12 @@
 import { and, asc, desc, eq, gte, inArray, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import { db, type Database } from "@/db";
-import { meltingAlloys, meltingEntries, meltingLines, metals } from "@/db/schema";
-import { toDecimal, toQuantityString } from "@/lib/decimal";
+import { entries, items, meltingAlloys, meltingEntries, meltingLines, metals } from "@/db/schema";
+import { SYSTEM_ACCOUNTS } from "@/config/constants";
+import { toDecimal, toQuantityString, type Decimal } from "@/lib/decimal";
+import { createEntryGroup } from "@/lib/entryBuilder";
+import { reverseEntryGroup } from "@/lib/reversal";
 import { AppError } from "@/types/errors";
-import { computeAlloy } from "./alloy";
+import { computeAlloy, computeMeltLoss, type MeltLossResult } from "./alloy";
 import type {
   CreateMeltingInput,
   CreateMetalInput,
@@ -14,10 +17,12 @@ import type {
   UpdateMetalInput,
 } from "./schema";
 
-export { computeAlloy } from "./alloy";
+export { computeAlloy, computeMeltLoss } from "./alloy";
 
-// Melting register — RECORD ONLY. Nothing here touches entry_groups/entries,
-// stock or any balance; these tables are a standalone log.
+// Melting register. Since 0023 every saved entry posts one MELTING entry_group
+// that moves the melted lots out of SHOP stock and the melted gold back in
+// (see "Stock posting" below). Pre-0023 entries have no group and stay
+// record-only until they are edited.
 
 type Tx = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
@@ -122,28 +127,24 @@ export async function deleteMetal(id: string) {
 //   pure       = weight × touch / 100                         → 3dp
 //   wastage    = weight × wastage% / touch  (Sales PERCENT mode, calcWastagePercent) → 3dp
 //   total_pure = (weight + UNROUNDED wastage) × touch / 100   → 3dp
-// Touch not entered → pure / wastage / total_pure are stored as null.
+// Touch is required since 0023 and normalised to 3dp (the gold stock row key).
 
 function computeLine(line: MeltingLineInput) {
   const weight = toDecimal(line.weight);
-  const touch = line.touch !== null ? toDecimal(line.touch) : null;
+  const touch = toDecimal(line.touch);
   const wPct = line.wastage_percent !== null ? toDecimal(line.wastage_percent) : null;
 
-  let pure: string | null = null;
-  let wastage: string | null = null;
-  let totalPure: string | null = null;
-
-  if (touch !== null) {
-    pure = toQuantityString(weight.mul(touch).div(100));
-    const rawWastage =
-      wPct !== null && wPct.gt(0) && touch.gt(0) ? weight.mul(wPct).div(touch) : toDecimal(0);
-    wastage = wPct !== null ? toQuantityString(rawWastage) : null;
-    totalPure = toQuantityString(weight.plus(rawWastage).mul(touch).div(100));
-  }
+  const pure = toQuantityString(weight.mul(touch).div(100));
+  const rawWastage =
+    wPct !== null && wPct.gt(0) && touch.gt(0) ? weight.mul(wPct).div(touch) : toDecimal(0);
+  const wastage = wPct !== null ? toQuantityString(rawWastage) : null;
+  const totalPure = toQuantityString(weight.plus(rawWastage).mul(touch).div(100));
 
   return {
+    item_id: line.item_id,
+    lot_id: line.lot_id,
     weight: toQuantityString(weight),
-    touch: line.touch,
+    touch: touch.toFixed(3),
     wastage_percent: line.wastage_percent,
     pure,
     wastage,
@@ -151,6 +152,8 @@ function computeLine(line: MeltingLineInput) {
     quantity: line.quantity,
   };
 }
+
+type PreparedLine = ReturnType<typeof computeLine>;
 
 async function assertMetalExists(tx: Tx, metalId: string) {
   const [m] = await tx.select({ id: metals.id }).from(metals).where(eq(metals.id, metalId)).limit(1);
@@ -166,15 +169,10 @@ async function assertAlloyMetalsExist(tx: Tx, alloys: MeltingAlloyInput[]) {
   }
 }
 
-async function insertLines(tx: Tx, meltingId: string, lines: MeltingLineInput[]) {
+async function insertLines(tx: Tx, meltingId: string, lines: PreparedLine[]) {
   await tx.insert(meltingLines).values(
-    lines.map((l, i) => ({ melting_id: meltingId, sort_order: i, ...computeLine(l) })),
+    lines.map((l, i) => ({ melting_id: meltingId, sort_order: i, ...l })),
   );
-}
-
-// Server-side alloy figures — client-sent numbers are ignored.
-function alloyFigures(input: CreateMeltingInput) {
-  return computeAlloy(input.lines, input.required_touch, input.alloys);
 }
 
 async function insertAlloys(
@@ -194,6 +192,193 @@ async function insertAlloys(
   );
 }
 
+// ─── Stock posting ───────────────────────────────────────────────────────────
+// One MELTING entry_group per melting entry, dated the melting date, booked
+// against the system LOSS account ("Loss / Wastage"):
+//   each line  : SHOP → LOSS  (item, lot, quantity = weight, purity = touch)
+//   output     : LOSS → SHOP  (output GOLD item, quantity = after_weight,
+//                              purity = out_touch; gold carries no lot)
+// The LOSS account's net is therefore exactly what was lost in the furnace.
+// Edit = reverse + re-post (same as Purchase/Sales), delete = reverse.
+
+const SHOP = SYSTEM_ACCOUNTS.SHOP_ID;
+const LOSS = SYSTEM_ACCOUNTS.LOSS_ID;
+
+type ItemMeta = { id: string; name: string; type: "GOLD" | "ORNAMENT" | "MONEY"; is_deleted: boolean };
+
+async function loadItems(tx: Tx, ids: string[]): Promise<Map<string, ItemMeta>> {
+  const unique = [...new Set(ids)];
+  const rows = await tx
+    .select({ id: items.id, name: items.name, type: items.type, is_deleted: items.is_deleted })
+    .from(items)
+    .where(inArray(items.id, unique));
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+/**
+ * Validates line items + output item and normalises lot ids: ornament lines
+ * must name a lot (ornament stock is per lot); gold lines never carry one (gold
+ * stock is one row per item AND touch — see getGoldStock).
+ */
+function validateItems(lines: PreparedLine[], outputItemId: string, meta: Map<string, ItemMeta>) {
+  const out = meta.get(outputItemId);
+  if (!out || out.is_deleted) {
+    throw new AppError("NOT_FOUND", "Selected output item no longer exists", "output_item_id");
+  }
+  if (out.type !== "GOLD") {
+    throw new AppError("VALIDATION_ERROR", "Output item must be a Gold item", "output_item_id");
+  }
+  return lines.map((l) => {
+    const m = meta.get(l.item_id);
+    if (!m) throw new AppError("NOT_FOUND", "A selected stock item no longer exists", "lines");
+    if (m.type === "MONEY") {
+      throw new AppError("VALIDATION_ERROR", `${m.name} is not a stock item`, "lines");
+    }
+    if (m.type === "ORNAMENT") {
+      if (!l.lot_id) {
+        throw new AppError("VALIDATION_ERROR", `Lot is required for ornament ${m.name}`, "lines");
+      }
+      return l;
+    }
+    return { ...l, lot_id: null };
+  });
+}
+
+/** Net SHOP weight of one gold stock row (item + touch). */
+async function goldTouchBalance(tx: Tx, itemId: string, touch: string) {
+  const [row] = await tx.execute<{ available: string }>(
+    sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SHOP} THEN quantity ELSE -quantity END), 0)::text AS available
+        FROM ${entries}
+        WHERE item_id = ${itemId}
+          AND COALESCE(purity, 0) = ${touch}::numeric
+          AND (to_account_id = ${SHOP} OR from_account_id = ${SHOP})`,
+  );
+  return toDecimal(row?.available ?? "0");
+}
+
+/**
+ * Each stock row (gold: item+touch, ornament: item+lot) must hold at least the
+ * total weight the lines take from it. Locks the rows like createSale does.
+ */
+async function assertStockAvailable(tx: Tx, lines: PreparedLine[], meta: Map<string, ItemMeta>) {
+  const need = new Map<string, { line: PreparedLine; weight: Decimal }>();
+  for (const l of lines) {
+    const key = l.lot_id ? `${l.item_id}::lot::${l.lot_id}` : `${l.item_id}::touch::${l.touch}`;
+    const cur = need.get(key);
+    need.set(key, { line: l, weight: (cur?.weight ?? toDecimal(0)).plus(toDecimal(l.weight)) });
+  }
+
+  for (const { line, weight } of need.values()) {
+    const name = meta.get(line.item_id)?.name ?? "item";
+    let available: Decimal;
+    let where: string;
+    if (line.lot_id) {
+      await tx.execute(
+        sql`SELECT id FROM ${entries}
+            WHERE item_id = ${line.item_id} AND lot_id = ${line.lot_id}
+              AND (to_account_id = ${SHOP} OR from_account_id = ${SHOP})
+            FOR UPDATE`,
+      );
+      const [row] = await tx.execute<{ available: string }>(
+        sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SHOP} THEN quantity ELSE -quantity END), 0)::text AS available
+            FROM ${entries}
+            WHERE item_id = ${line.item_id} AND lot_id = ${line.lot_id}
+              AND (to_account_id = ${SHOP} OR from_account_id = ${SHOP})`,
+      );
+      available = toDecimal(row?.available ?? "0");
+      where = `lot ${line.lot_id}`;
+    } else {
+      await tx.execute(
+        sql`SELECT id FROM ${entries}
+            WHERE item_id = ${line.item_id}
+              AND (to_account_id = ${SHOP} OR from_account_id = ${SHOP})
+            FOR UPDATE`,
+      );
+      available = await goldTouchBalance(tx, line.item_id, line.touch);
+      where = `touch ${line.touch}`;
+    }
+    if (available.lt(weight)) {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        `Not enough stock for ${name} (${where}). Available: ${toQuantityString(available.gt(0) ? available : toDecimal(0))} g, required: ${toQuantityString(weight)} g`,
+        "lines",
+      );
+    }
+  }
+}
+
+async function postMeltingGroup(
+  tx: Tx,
+  args: {
+    entryNo: number;
+    date: string;
+    remarks: string | null;
+    lines: PreparedLine[];
+    outputItemId: string;
+    afterWeight: string;
+    outTouch: string;
+  },
+) {
+  const { group } = await createEntryGroup(
+    {
+      type: "MELTING",
+      accountId: LOSS,
+      date: args.date,
+      entryNo: args.entryNo,
+      skipBillNo: true,
+      remarks: `Melting #${args.entryNo}${args.remarks ? ` - ${args.remarks}` : ""}`,
+      entries: [
+        ...args.lines.map((l) => ({
+          fromAccountId: SHOP,
+          toAccountId: LOSS,
+          itemId: l.item_id,
+          lotId: l.lot_id ?? undefined,
+          quantity: l.weight,
+          purity: l.touch,
+        })),
+        {
+          fromAccountId: LOSS,
+          toAccountId: SHOP,
+          itemId: args.outputItemId,
+          quantity: args.afterWeight,
+          purity: args.outTouch,
+        },
+      ],
+    },
+    tx,
+  );
+  return group.id;
+}
+
+/**
+ * Reverses a previously posted group. If the melted gold it put into stock has
+ * since been sold/used, taking it back out would drive that gold row negative —
+ * refuse instead (checked after `afterReverse`, so an edit that re-adds the
+ * same output is judged on the net effect).
+ */
+async function reverseMeltingGroup(
+  tx: Tx,
+  old: { entry_group_id: string; output_item_id: string | null; out_touch: string | null },
+  afterReverse?: () => Promise<void>,
+) {
+  const touch = old.out_touch !== null ? toDecimal(old.out_touch).toFixed(3) : null;
+  const before =
+    old.output_item_id && touch ? await goldTouchBalance(tx, old.output_item_id, touch) : null;
+
+  await reverseEntryGroup(old.entry_group_id, tx);
+  if (afterReverse) await afterReverse();
+
+  if (old.output_item_id && touch && before !== null && before.gte(0)) {
+    const after = await goldTouchBalance(tx, old.output_item_id, touch);
+    if (after.lt(0)) {
+      throw new AppError(
+        "BUSINESS_RULE_VIOLATION",
+        `The melted gold from this entry has already been used (only ${toQuantityString(before)} g left at touch ${old.out_touch}). Reverse the later transactions first.`,
+      );
+    }
+  }
+}
+
 // ─── Melting entries ─────────────────────────────────────────────────────────
 
 export async function getNextEntryNo(): Promise<{ entryNo: number }> {
@@ -203,31 +388,65 @@ export async function getNextEntryNo(): Promise<{ entryNo: number }> {
   return { entryNo: Number(row?.next ?? 1) };
 }
 
+/** Server-side figures for a create/update — client-sent numbers are ignored. */
+async function prepare(tx: Tx, input: CreateMeltingInput) {
+  if (input.metal_id) await assertMetalExists(tx, input.metal_id);
+  await assertAlloyMetalsExist(tx, input.alloys);
+  const computed = input.lines.map(computeLine);
+  const meta = await loadItems(tx, [...computed.map((l) => l.item_id), input.output_item_id]);
+  const lines = validateItems(computed, input.output_item_id, meta);
+  const calc = computeMeltLoss(lines, input.required_touch, input.alloys, input.after_weight);
+  return { lines, meta, calc };
+}
+
+function entryValues(input: CreateMeltingInput, calc: MeltLossResult) {
+  return {
+    date: input.date,
+    remarks: input.remarks?.trim() || null,
+    required_touch: input.required_touch,
+    final_weight: calc.final_weight,
+    alloy_total: calc.alloy_total,
+    after_weight: calc.after_weight,
+    output_item_id: input.output_item_id,
+    out_touch: calc.out_touch,
+    expected_weight: calc.expected_weight,
+    loss_weight: calc.loss_weight,
+    pure_loss: calc.pure_loss,
+  };
+}
+
 export async function createMelting(input: CreateMeltingInput) {
   return db.transaction(async (tx) => {
-    if (input.metal_id) await assertMetalExists(tx, input.metal_id);
-    await assertAlloyMetalsExist(tx, input.alloys);
-    const calc = alloyFigures(input);
+    const { lines, meta, calc } = await prepare(tx, input);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('melting_entry_no'))`);
     const [nextRow] = await tx
       .select({ next: sql<number>`COALESCE(MAX(${meltingEntries.entry_no}), 0) + 1` })
       .from(meltingEntries);
     const entryNo = Number(nextRow?.next ?? 1);
 
+    await assertStockAvailable(tx, lines, meta);
+    const values = entryValues(input, calc);
+    const groupId = await postMeltingGroup(tx, {
+      entryNo,
+      date: input.date,
+      remarks: values.remarks,
+      lines,
+      outputItemId: input.output_item_id,
+      afterWeight: calc.after_weight,
+      outTouch: calc.out_touch,
+    });
+
     const [entry] = await tx
       .insert(meltingEntries)
       .values({
         entry_no: entryNo,
-        date: input.date,
         metal_id: input.metal_id ?? null,
-        remarks: input.remarks?.trim() || null,
-        required_touch: input.required_touch,
-        final_weight: calc.final_weight,
-        alloy_total: calc.alloy_total,
+        ...values,
+        entry_group_id: groupId,
       })
       .returning({ id: meltingEntries.id, entry_no: meltingEntries.entry_no });
 
-    await insertLines(tx, entry!.id, input.lines);
+    await insertLines(tx, entry!.id, lines);
     await insertAlloys(tx, entry!.id, calc.alloys);
     return { id: entry!.id, entry_no: entry!.entry_no };
   });
@@ -236,32 +455,63 @@ export async function createMelting(input: CreateMeltingInput) {
 export async function updateMelting(input: UpdateMeltingInput) {
   return db.transaction(async (tx) => {
     const [existing] = await tx
-      .select({ id: meltingEntries.id, entry_no: meltingEntries.entry_no })
+      .select({
+        id: meltingEntries.id,
+        entry_no: meltingEntries.entry_no,
+        entry_group_id: meltingEntries.entry_group_id,
+        output_item_id: meltingEntries.output_item_id,
+        out_touch: meltingEntries.out_touch,
+      })
       .from(meltingEntries)
       .where(and(eq(meltingEntries.id, input.id), eq(meltingEntries.is_deleted, false)))
       .limit(1)
       .for("update");
     if (!existing) throw new AppError("NOT_FOUND", "Melting entry not found");
-    if (input.metal_id) await assertMetalExists(tx, input.metal_id);
-    await assertAlloyMetalsExist(tx, input.alloys);
-    const calc = alloyFigures(input);
+    const { lines, meta, calc } = await prepare(tx, input);
+    const values = entryValues(input, calc);
+
+    // Old stock movement comes back first, so the new lines can re-take the
+    // same lots; a legacy (record-only) entry has nothing to reverse.
+    let groupId = "";
+    const repost = async () => {
+      await assertStockAvailable(tx, lines, meta);
+      groupId = await postMeltingGroup(tx, {
+        entryNo: existing.entry_no,
+        date: input.date,
+        remarks: values.remarks,
+        lines,
+        outputItemId: input.output_item_id,
+        afterWeight: calc.after_weight,
+        outTouch: calc.out_touch,
+      });
+    };
+    if (existing.entry_group_id) {
+      await reverseMeltingGroup(
+        tx,
+        {
+          entry_group_id: existing.entry_group_id,
+          output_item_id: existing.output_item_id,
+          out_touch: existing.out_touch,
+        },
+        repost,
+      );
+    } else {
+      await repost();
+    }
 
     await tx
       .update(meltingEntries)
       .set({
-        date: input.date,
         // undefined = leave the legacy metal as is; null = clear it.
         ...(input.metal_id !== undefined ? { metal_id: input.metal_id } : {}),
-        remarks: input.remarks?.trim() || null,
-        required_touch: input.required_touch,
-        final_weight: calc.final_weight,
-        alloy_total: calc.alloy_total,
+        ...values,
+        entry_group_id: groupId,
         updated_at: new Date(),
       })
       .where(eq(meltingEntries.id, input.id));
 
     await tx.delete(meltingLines).where(eq(meltingLines.melting_id, input.id));
-    await insertLines(tx, input.id, input.lines);
+    await insertLines(tx, input.id, lines);
     await tx.delete(meltingAlloys).where(eq(meltingAlloys.melting_id, input.id));
     await insertAlloys(tx, input.id, calc.alloys);
     return { id: existing.id, entry_no: existing.entry_no };
@@ -269,13 +519,33 @@ export async function updateMelting(input: UpdateMeltingInput) {
 }
 
 export async function deleteMelting(id: string) {
-  const [row] = await db
-    .update(meltingEntries)
-    .set({ is_deleted: true, updated_at: new Date() })
-    .where(and(eq(meltingEntries.id, id), eq(meltingEntries.is_deleted, false)))
-    .returning({ id: meltingEntries.id });
-  if (!row) throw new AppError("NOT_FOUND", "Melting entry not found");
-  return { success: true as const };
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({
+        id: meltingEntries.id,
+        entry_group_id: meltingEntries.entry_group_id,
+        output_item_id: meltingEntries.output_item_id,
+        out_touch: meltingEntries.out_touch,
+      })
+      .from(meltingEntries)
+      .where(and(eq(meltingEntries.id, id), eq(meltingEntries.is_deleted, false)))
+      .limit(1)
+      .for("update");
+    if (!existing) throw new AppError("NOT_FOUND", "Melting entry not found");
+
+    if (existing.entry_group_id) {
+      await reverseMeltingGroup(tx, {
+        entry_group_id: existing.entry_group_id,
+        output_item_id: existing.output_item_id,
+        out_touch: existing.out_touch,
+      });
+    }
+    await tx
+      .update(meltingEntries)
+      .set({ is_deleted: true, updated_at: new Date() })
+      .where(eq(meltingEntries.id, id));
+    return { success: true as const };
+  });
 }
 
 async function fetchAlloys(meltingIds: string[]) {
@@ -310,7 +580,7 @@ export async function listMelting(input: ListMeltingInput) {
   if (input.search) {
     const like = `%${input.search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     conds.push(
-      sql`(${meltingEntries.entry_no}::text ILIKE ${like} OR ${meltingEntries.remarks} ILIKE ${like} OR ${metals.name} ILIKE ${like} OR EXISTS (SELECT 1 FROM melting_alloys ma JOIN metals am ON am.id = ma.metal_id WHERE ma.melting_id = ${meltingEntries.id} AND am.name ILIKE ${like}))`,
+      sql`(${meltingEntries.entry_no}::text ILIKE ${like} OR ${meltingEntries.remarks} ILIKE ${like} OR ${metals.name} ILIKE ${like} OR ${items.name} ILIKE ${like} OR EXISTS (SELECT 1 FROM melting_alloys ma JOIN metals am ON am.id = ma.metal_id WHERE ma.melting_id = ${meltingEntries.id} AND am.name ILIKE ${like}))`,
     );
   }
   const where = and(...conds);
@@ -319,6 +589,7 @@ export async function listMelting(input: ListMeltingInput) {
     .select({ total: sql<number>`count(*)::int` })
     .from(meltingEntries)
     .leftJoin(metals, eq(metals.id, meltingEntries.metal_id))
+    .leftJoin(items, eq(items.id, meltingEntries.output_item_id))
     .where(where);
 
   // Per-entry line totals, aggregated once and joined in.
@@ -345,6 +616,10 @@ export async function listMelting(input: ListMeltingInput) {
       remarks: meltingEntries.remarks,
       required_touch: meltingEntries.required_touch,
       alloy_total: meltingEntries.alloy_total,
+      after_weight: meltingEntries.after_weight,
+      loss_weight: meltingEntries.loss_weight,
+      pure_loss: meltingEntries.pure_loss,
+      output_item_name: items.name,
       line_count: totals.line_count,
       total_weight: totals.total_weight,
       total_pure: totals.total_pure,
@@ -353,6 +628,7 @@ export async function listMelting(input: ListMeltingInput) {
     })
     .from(meltingEntries)
     .leftJoin(metals, eq(metals.id, meltingEntries.metal_id))
+    .leftJoin(items, eq(items.id, meltingEntries.output_item_id))
     .leftJoin(totals, eq(totals.melting_id, meltingEntries.id))
     .where(where)
     .orderBy(desc(meltingEntries.date), desc(meltingEntries.entry_no))
@@ -394,15 +670,26 @@ export async function getMeltingById(id: string) {
       required_touch: meltingEntries.required_touch,
       final_weight: meltingEntries.final_weight,
       alloy_total: meltingEntries.alloy_total,
+      output_item_id: meltingEntries.output_item_id,
+      output_item_name: items.name,
+      after_weight: meltingEntries.after_weight,
+      out_touch: meltingEntries.out_touch,
+      expected_weight: meltingEntries.expected_weight,
+      loss_weight: meltingEntries.loss_weight,
+      pure_loss: meltingEntries.pure_loss,
     })
     .from(meltingEntries)
     .leftJoin(metals, eq(metals.id, meltingEntries.metal_id))
+    .leftJoin(items, eq(items.id, meltingEntries.output_item_id))
     .where(and(eq(meltingEntries.id, id), eq(meltingEntries.is_deleted, false)))
     .limit(1);
   if (!entry) throw new AppError("NOT_FOUND", "Melting entry not found");
 
   const lines = await db
     .select({
+      item_id: meltingLines.item_id,
+      item_name: items.name,
+      lot_id: meltingLines.lot_id,
       weight: meltingLines.weight,
       touch: meltingLines.touch,
       wastage_percent: meltingLines.wastage_percent,
@@ -412,6 +699,7 @@ export async function getMeltingById(id: string) {
       quantity: meltingLines.quantity,
     })
     .from(meltingLines)
+    .leftJoin(items, eq(items.id, meltingLines.item_id))
     .where(eq(meltingLines.melting_id, id))
     .orderBy(asc(meltingLines.sort_order));
 
@@ -433,5 +721,47 @@ export async function getMeltingById(id: string) {
       ...l,
       quantity: l.quantity === null ? null : String(l.quantity),
     })),
+  };
+}
+
+// ─── Totals (Stock page) ─────────────────────────────────────────────────────
+// Over non-deleted melting entries that posted stock (entry_group_id set), by
+// melting date. in = lots taken out of stock; out = melted gold put back;
+// melted_out_pure = in_pure − pure_loss (exactly the stored per-entry figures).
+
+export async function getMeltingTotals(input: { from_date: string; to_date: string }) {
+  const [row] = await db.execute<{
+    in_weight: string | null;
+    in_pure: string | null;
+    out_weight: string | null;
+    loss_weight: string | null;
+    pure_loss: string | null;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(t.w), 0)::text AS in_weight,
+      COALESCE(SUM(t.p), 0)::text AS in_pure,
+      COALESCE(SUM(me.after_weight), 0)::text AS out_weight,
+      COALESCE(SUM(me.loss_weight), 0)::text AS loss_weight,
+      COALESCE(SUM(me.pure_loss), 0)::text AS pure_loss
+    FROM melting_entries me
+    LEFT JOIN (
+      SELECT melting_id, SUM(weight) AS w, SUM(COALESCE(pure, 0)) AS p
+      FROM melting_lines GROUP BY melting_id
+    ) t ON t.melting_id = me.id
+    WHERE me.is_deleted = false
+      AND me.entry_group_id IS NOT NULL
+      AND me.date >= ${input.from_date}
+      AND me.date <= ${input.to_date}
+  `);
+
+  const inPure = toDecimal(row?.in_pure ?? "0");
+  const pureLoss = toDecimal(row?.pure_loss ?? "0");
+  return {
+    melted_in_weight: toQuantityString(toDecimal(row?.in_weight ?? "0")),
+    melted_in_pure: toQuantityString(inPure),
+    melted_out_weight: toQuantityString(toDecimal(row?.out_weight ?? "0")),
+    melted_out_pure: toQuantityString(inPure.minus(pureLoss)),
+    loss_weight: toQuantityString(toDecimal(row?.loss_weight ?? "0")),
+    pure_loss: toQuantityString(pureLoss),
   };
 }

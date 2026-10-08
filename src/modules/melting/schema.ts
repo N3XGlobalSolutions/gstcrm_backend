@@ -1,7 +1,8 @@
 import { z } from "zod";
 
-// Melting register — RECORD ONLY (see db/schema/melting.ts). Decimals travel as
-// strings like every other module; dates as YYYY-MM-DD.
+// Melting register — moves stock since 0023 (see db/schema/melting.ts and
+// service.ts). Decimals travel as strings like every other module; dates as
+// YYYY-MM-DD.
 
 const dateSchema = z
   .string()
@@ -32,14 +33,24 @@ export const MetalIdSchema = z.object({ id: z.string().uuid() });
 // ─── Melting entries ─────────────────────────────────────────────────────────
 
 export const MeltingLineSchema = z.object({
+  // Stock source: the item clicked in the Gold/Ornament stock panel. Ornament
+  // lines also need the lot; gold stock carries no lot (it is keyed on touch).
+  item_id: z.string().uuid("Select a stock item"),
+  lot_id: z
+    .string()
+    .trim()
+    .max(20)
+    .nullish()
+    .transform((v) => (v ? v : null)),
   weight: decimalString("Weight").refine(
     (v) => Number.parseFloat(v) > 0,
     "Weight must be greater than zero",
   ),
-  touch: optionalDecimal("Touch").refine(
-    (v) => v === null || Number.parseFloat(v) <= 100,
-    "Touch cannot exceed 100",
-  ),
+  // Required: it is the purity the stock leaves SHOP at (and, for gold, which
+  // touch row of the item it is taken from). 0 is allowed (touch-less stock).
+  touch: decimalString("Touch")
+    .refine((v) => v !== "", "Touch is required")
+    .refine((v) => v === "" || Number.parseFloat(v) <= 100, "Touch cannot exceed 100"),
   wastage_percent: optionalDecimal("Wastage %"),
   // Accepted for convenience but always recomputed on the server.
   pure: optionalDecimal("Pure"),
@@ -80,6 +91,13 @@ const meltingBody = {
     "Required touch must be greater than 0 and at most 100",
   ),
   alloys: z.array(MeltingAlloySchema).optional().default([]),
+  // Melted gold goes back into SHOP stock under this GOLD item.
+  output_item_id: z.string().uuid("Select the output gold item"),
+  // Weight weighed after melting.
+  after_weight: decimalString("After weight").refine(
+    (v) => v !== "" && Number.parseFloat(v) > 0,
+    "After weight must be greater than zero",
+  ),
   lines: z.array(MeltingLineSchema).min(1, "Add at least one line"),
 };
 

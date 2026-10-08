@@ -351,11 +351,16 @@ const backupRouter = router({
       //    `entries` / `entry_groups`, so wiping those six tables clears
       //    everything the user asked to remove in one shot.
       await db.transaction(async (tx) => {
-        // These six tables hold every stock movement, bill, expense, and
-        // opening entry. Nothing we keep has a foreign key into them, and
-        // `entries` is the only child of `entry_groups`, so TRUNCATE ... CASCADE
+        // These tables hold every stock movement, bill, expense, and
+        // opening entry. Melting entries post MELTING entry groups (0023) and
+        // reference entry_groups, so they go too (CASCADE would take them
+        // anyway) — the metals master is kept. `entries` and melting_entries
+        // are the only children of `entry_groups`, so TRUNCATE ... CASCADE
         // is safe and self-contained.
         const tablesToWipe = [
+          "melting_alloys",
+          "melting_lines",
+          "melting_entries",
           "entries",
           "entry_groups",
           "labour_bill_cycles",

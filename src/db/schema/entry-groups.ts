@@ -24,6 +24,9 @@ export const entryGroupTypeEnum = pgEnum("entry_group_type", [
   "EXPENSE",
   "OPENING",
   "REVERSAL",
+  // Melting register (0023): lots taken out of SHOP stock and the melted gold
+  // put back, via the system LOSS account. Moves stock only - no bill, no party.
+  "MELTING",
 ]);
 
 // ─── entry_groups ─────────────────────────────────────────────────────────────

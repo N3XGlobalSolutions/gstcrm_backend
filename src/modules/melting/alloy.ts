@@ -83,3 +83,45 @@ export function computeAlloy(
     alloys: outAlloys,
   };
 }
+
+// ─── Melt loss (0023) ────────────────────────────────────────────────────────
+// What came out of the furnace vs what should have:
+//   expected_weight = current_weight + alloy_total   (alloy adds weight, no gold)
+//   out_touch       = required_touch if set, else current_touch           → 2dp
+//   loss_weight     = expected_weight − after_weight  (may be negative)   → 3dp
+//   pure_out        = after_weight × out_touch / 100                      → 3dp
+//   pure_loss       = current_pure − pure_out         (may be negative)   → 3dp
+
+export interface MeltLossResult extends AlloyResult {
+  expected_weight: string;
+  after_weight: string;
+  out_touch: string;
+  loss_weight: string;
+  pure_out: string;
+  pure_loss: string;
+}
+
+export function computeMeltLoss(
+  lines: AlloyLineInput[],
+  requiredTouch: string | null,
+  alloys: AlloyShareInput[],
+  afterWeight: string,
+): MeltLossResult {
+  const calc = computeAlloy(lines, requiredTouch, alloys);
+  const expected = toDecimal(calc.current_weight).plus(toDecimal(calc.alloy_total ?? "0"));
+  const outTouch =
+    requiredTouch !== null && requiredTouch !== ""
+      ? toDecimal(requiredTouch).toFixed(2)
+      : (calc.current_touch ?? "0.00");
+  const after = toDecimal(toQuantityString(toDecimal(afterWeight)));
+  const pureOut = toDecimal(toQuantityString(after.mul(toDecimal(outTouch)).div(100)));
+  return {
+    ...calc,
+    expected_weight: toQuantityString(expected),
+    after_weight: toQuantityString(after),
+    out_touch: outTouch,
+    loss_weight: toQuantityString(expected.minus(after)),
+    pure_out: toQuantityString(pureOut),
+    pure_loss: toQuantityString(toDecimal(calc.current_pure).minus(pureOut)),
+  };
+}

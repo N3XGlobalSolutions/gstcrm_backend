@@ -4,6 +4,8 @@ import { eq } from "drizzle-orm";
 import { AppError } from "@/types/errors";
 import { createEntryGroup } from "./entryBuilder";
 
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /**
  * Reverse a completed entry group.
  *
@@ -16,9 +18,11 @@ import { createEntryGroup } from "./entryBuilder";
  *  6. Soft-delete the original entry_group (is_deleted = true)
  *
  * @param originalGroupId - UUID of the entry_group to reverse
+ * @param externalTx - Optional caller transaction, so a reverse + re-post (e.g.
+ *   a melting edit) commits or rolls back as one unit. Omitted = own transaction.
  */
-export async function reverseEntryGroup(originalGroupId: string) {
-  return db.transaction(async (tx) => {
+export async function reverseEntryGroup(originalGroupId: string, externalTx?: Tx) {
+  const run = async (tx: Tx) => {
     // Step 1 — Fetch original group
     const [original] = await tx
       .select()
@@ -95,5 +99,7 @@ export async function reverseEntryGroup(originalGroupId: string) {
       .where(eq(entryGroups.id, originalGroupId));
 
     return reversalGroup;
-  });
+  };
+
+  return externalTx ? run(externalTx) : db.transaction(run);
 }

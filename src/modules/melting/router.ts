@@ -21,7 +21,8 @@ import {
   updateMetal,
 } from "./service";
 
-// Melting register — RECORD ONLY (no ledger, stock or balance effect).
+// Melting register — create/update/delete post (or reverse) a MELTING entry
+// group that moves stock; see service.ts. Totals live on stock.getMeltingTotals.
 // Gated like the Bank page: any logged-in user (protectedProcedure).
 export const meltingRouter = router({
   metals: router({
