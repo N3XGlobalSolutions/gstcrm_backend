@@ -1,6 +1,6 @@
-import { and, eq, gte, inArray, isNotNull, lte, ne } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, lte } from "drizzle-orm";
 import { db } from "@/db";
-import { entries, entryGroups, items } from "@/db/schema";
+import { entryGroups } from "@/db/schema";
 
 const num = (v: string | null | undefined) => Number.parseFloat(v || "0") || 0;
 
@@ -42,17 +42,19 @@ export function currentFinancialYear(now: Date = new Date()): { from_date: strin
 }
 
 export interface PartyAverage {
+  /** Bills counted — those with a non-zero rate per gram. */
   bill_count: number;
-  total_amount: string;
-  avg_amount: string;
+  /** Simple average of each bill's rate per gram (₹/g), 2dp. */
+  avg_rate: string;
   from_date: string;
   to_date: string;
 }
 
 /**
- * Average bill (goods) value per party for the current financial year, over live
- * SALE / PURCHASE bills that carry a bill number. Two queries for any number of
- * accounts. Every requested account is present in the result (zeros when none).
+ * Average rate (₹ per gram) per party for the current financial year: the simple
+ * mean of entry_groups.rate_per_gram over live SALE / PURCHASE bills that carry a
+ * bill number (conversions excluded, null/0 rates skipped). One query for any
+ * number of accounts. Every requested account is present in the result.
  */
 export async function getPartyAverages(
   type: "SALE" | "PURCHASE",
@@ -66,7 +68,6 @@ export async function getPartyAverages(
   if (unique.length) {
     const groups = await db
       .select({
-        id: entryGroups.id,
         accountId: entryGroups.account_id,
         ratePerGram: entryGroups.rate_per_gram,
         remarks: entryGroups.remarks,
@@ -83,36 +84,14 @@ export async function getPartyAverages(
         ),
       );
 
-    const realGroups = groups.filter((g) => !isConversion(g.remarks));
-    const groupIds = realGroups.map((g) => g.id);
-
-    const lines = groupIds.length
-      ? await db
-          .select({
-            groupId: entries.group_id,
-            quantity: entries.quantity,
-            purity: entries.purity,
-            pure: entries.pure_quantity,
-            rate: entries.rate,
-          })
-          .from(entries)
-          .innerJoin(items, eq(entries.item_id, items.id))
-          .where(and(inArray(entries.group_id, groupIds), ne(items.type, "MONEY")))
-      : [];
-
-    const goodsByGroup = new Map<string, number>();
-    const rateByGroup = new Map(realGroups.map((g) => [g.id, num(g.ratePerGram)]));
-    for (const line of lines) {
-      const amount = lineGoodsAmount(line, rateByGroup.get(line.groupId) ?? 0);
-      goodsByGroup.set(line.groupId, (goodsByGroup.get(line.groupId) ?? 0) + amount);
-    }
-
-    for (const g of realGroups) {
+    for (const g of groups) {
+      if (isConversion(g.remarks)) continue;
+      const rate = num(g.ratePerGram);
+      if (rate <= 0) continue;
       const t = totals.get(g.accountId);
       if (!t) continue;
       t.count += 1;
-      // Rounded per bill, matching the detailed report's goods_amount.
-      t.total += Math.round((goodsByGroup.get(g.id) ?? 0) * 100) / 100;
+      t.total += rate;
     }
   }
 
@@ -120,8 +99,7 @@ export async function getPartyAverages(
   for (const [id, t] of totals) {
     result.set(id, {
       bill_count: t.count,
-      total_amount: t.total.toFixed(2),
-      avg_amount: (t.count ? t.total / t.count : 0).toFixed(2),
+      avg_rate: (t.count ? t.total / t.count : 0).toFixed(2),
       from_date,
       to_date,
     });

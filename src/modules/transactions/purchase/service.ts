@@ -100,7 +100,7 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
     .limit(1);
   const globalLastBillId = globalLastBill?.id;
 
-  // Current-year average bill value per supplier — one batched lookup for the page.
+  // Current-year average rate (₹/g) per supplier — one batched lookup for the page.
   const partyAverages = await getPartyAverages(
     "PURCHASE",
     enrichedData.map((d) => d.group.account_id),
@@ -122,7 +122,7 @@ export async function listPurchases(input: z.infer<typeof ListTxSchema>) {
       ...d,
       group: {
         ...d.group,
-        party_avg_amount: avg?.avg_amount ?? "0.00",
+        party_avg_rate: avg?.avg_rate ?? "0.00",
         party_bill_count: avg?.bill_count ?? 0,
       },
       openingPure: openingPureNum.toFixed(4),
