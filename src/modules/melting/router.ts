@@ -14,6 +14,7 @@ import {
   deleteMelting,
   deleteMetal,
   getMeltingById,
+  getMeltingPureTotals,
   getNextEntryNo,
   listMelting,
   listMetals,
@@ -39,6 +40,9 @@ export const meltingRouter = router({
   }),
 
   getNextEntryNo: protectedProcedure.query(async () => getNextEntryNo()),
+
+  /** All-time pure lost and pure gained across melting entries (Melting page header). */
+  pureTotals: protectedProcedure.query(async () => getMeltingPureTotals()),
 
   list: protectedProcedure
     .input(ListMeltingSchema)

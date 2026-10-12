@@ -765,3 +765,34 @@ export async function getMeltingTotals(input: { from_date: string; to_date: stri
     pure_loss: toQuantityString(pureLoss),
   };
 }
+
+// ─── Overall pure loss / profit (Melting page) ──────────────────────────────
+// Over every non-deleted melting entry, all time. A positive pure_loss is pure
+// lost in the furnace; a negative one is pure gained, so the two are summed
+// separately: pure_loss = Σ positives, pure_profit = Σ |negatives|.
+
+export async function getMeltingPureTotals() {
+  const [row] = await db.execute<{
+    pure_loss: string | null;
+    pure_profit: string | null;
+    entries: string | null;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(CASE WHEN me.pure_loss > 0 THEN me.pure_loss ELSE 0 END), 0)::text AS pure_loss,
+      COALESCE(SUM(CASE WHEN me.pure_loss < 0 THEN -me.pure_loss ELSE 0 END), 0)::text AS pure_profit,
+      COUNT(*)::text AS entries
+    FROM melting_entries me
+    WHERE me.is_deleted = false
+      AND me.pure_loss IS NOT NULL
+  `);
+
+  const pureLoss = toDecimal(row?.pure_loss ?? "0");
+  const pureProfit = toDecimal(row?.pure_profit ?? "0");
+  return {
+    pure_loss: toQuantityString(pureLoss),
+    pure_profit: toQuantityString(pureProfit),
+    /** profit − loss: positive = net gain, negative = net loss. */
+    net_pure: toQuantityString(pureProfit.minus(pureLoss)),
+    entries: Number(row?.entries ?? 0),
+  };
+}
