@@ -387,6 +387,8 @@ export interface AccountLotBalance {
   purity: Decimal | null;
   average_touch: Decimal | null;
   pure_quantity: Decimal | null;
+  /** Net piece count (pieces in − pieces out); informational, from entries.piece_count. */
+  pieces: Decimal;
   created_at: Date;
 }
 
@@ -413,6 +415,7 @@ export async function getAccountLotBalances(
       // bills, occasionally into negative territory (same bug class already fixed
       // for the dashboard's Total Purchase metric — see dashboard/router.ts).
       net_pure_quantity: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN ${entries.quantity} * COALESCE(${entries.purity}, 0) / 100 ELSE -(${entries.quantity} * COALESCE(${entries.purity}, 0) / 100) END)::text`,
+      net_pieces: sql`SUM(CASE WHEN ${entries.to_account_id} = ${accountId} THEN COALESCE(${entries.piece_count}, 0) ELSE -COALESCE(${entries.piece_count}, 0) END)::text`,
       created_at: sql`MIN(${entries.created_at})`,
     })
     .from(entries)
@@ -442,6 +445,7 @@ export async function getAccountLotBalances(
     purity: row.purity ? toDecimal(row.purity as string) : null,
     average_touch: row.average_touch ? toDecimal(row.average_touch as string) : null,
     pure_quantity: row.net_pure_quantity ? toDecimal(row.net_pure_quantity as string) : null,
+    pieces: toDecimal((row.net_pieces as string) || "0"),
     created_at: new Date(row.created_at as string | Date),
   }));
 }

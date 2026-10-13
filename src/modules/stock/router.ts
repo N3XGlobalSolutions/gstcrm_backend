@@ -208,6 +208,7 @@ export async function getOrnamentStock(input: { page: number; limit: number }) {
       purity: pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined,
       average_touch: lot.average_touch ? lot.average_touch.toFixed(2) : (pur !== null && !isNaN(pur) ? lot.purity!.toFixed(2) : undefined),
       pure_balance: pureQty !== null && !isNaN(pureQty) ? lot.pure_quantity!.toFixed(3) : undefined,
+      pieces: lot.pieces.gt(0) ? lot.pieces.toFixed(0) : undefined,
       created_at: lot.created_at,
     };
   });
@@ -259,6 +260,8 @@ const AddOpeningStockSchema = z.object({
         item_id: z.string().uuid(),
         quantity: z.string(),
         purity: z.string(),
+        // Optional piece count (e.g. 5 rings) — informational, no effect on weight/pure math
+        piece_count: z.string().optional(),
       }),
     )
     .optional()
@@ -306,6 +309,12 @@ async function addOpeningStock(input: AddOpeningStockInput) {
         message: "All quantity and purity values must be greater than zero",
       });
     }
+    if (item.piece_count && !/^\d+$/.test(item.piece_count.trim())) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Ornament quantity must be a whole number of pieces",
+      });
+    }
   }
   for (const item of mc_gold_items) {
     if (!isPositive(item.quantity) || !isPositive(item.purity)) {
@@ -332,6 +341,7 @@ async function addOpeningStock(input: AddOpeningStockInput) {
         itemId: item.item_id,
         quantity: item.quantity,
         purity: item.purity,
+        pieceCount: item.piece_count && toDecimal(item.piece_count).gt(0) ? item.piece_count : undefined,
       })),
     ];
 
