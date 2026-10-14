@@ -583,65 +583,81 @@ export async function createSale(
       .from(itemsTable)
       .where(inArray(itemsTable.id, processedItems.map(item => item.item_id)));
 
-    await Promise.all(
-      processedItems.map(async (item) => {
-        const itemMeta = dbItems.find(d => d.id === item.item_id);
-        if (!itemMeta) {
-          throw new AppError("NOT_FOUND", `Item ${item.item_id} not found`);
-        }
+    // Sum the physical weight per stock bucket (ornament → item+lot, gold → item)
+    // BEFORE checking. Checking each line on its own let the same lot be added
+    // several times (e.g. 5 × 100g lines against a 100g lot) and every line passed.
+    const required = new Map<string, { item_id: string; lot_id: string | null | undefined; quantity: ReturnType<typeof toDecimal> }>();
+    for (const item of processedItems) {
+      const itemMeta = dbItems.find(d => d.id === item.item_id);
+      if (!itemMeta) {
+        throw new AppError("NOT_FOUND", `Item ${item.item_id} not found`);
+      }
+      const key = itemMeta.type === "ORNAMENT" ? `${item.item_id}|${item.lot_id ?? ""}` : item.item_id;
+      const bucket = required.get(key);
+      if (bucket) {
+        bucket.quantity = bucket.quantity.plus(toDecimal(item.quantity));
+      } else {
+        required.set(key, { item_id: item.item_id, lot_id: item.lot_id, quantity: toDecimal(item.quantity) });
+      }
+    }
 
-        if (itemMeta.type === "ORNAMENT") {
-          if (!item.lot_id) {
-            throw new AppError("VALIDATION_ERROR", `Lot ID is required for ornament: ${itemMeta.name}`);
-          }
-          await tx.execute(
-            sql`SELECT id FROM ${entries}
-                WHERE item_id = ${item.item_id}
-                  AND lot_id = ${item.lot_id}
-                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
-                FOR UPDATE`,
-          );
-          const [row] = await tx.execute<{ available: string }>(
-            sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
-                FROM ${entries}
-                WHERE item_id = ${item.item_id}
-                  AND lot_id = ${item.lot_id}
-                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
-          );
-          const available = toDecimal(row?.available ?? "0");
-          // Only the PHYSICAL weight is checked/consumed — wastage is a profit
-          // line billed via pure_quantity, not physical gold leaving the lot.
-          if (available.lt(toDecimal(item.quantity))) {
-            throw new AppError(
-              "BUSINESS_RULE_VIOLATION",
-              `Insufficient stock for ornament ${itemMeta.name} in lot ${item.lot_id}. Available: ${available.toFixed(3)}g, Required: ${item.quantity}g`,
-            );
-          }
-        } else {
-          // GOLD (pooled mode)
-          await tx.execute(
-            sql`SELECT id FROM ${entries}
-                WHERE item_id = ${item.item_id}
-                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
-                FOR UPDATE`,
-          );
-          const [row] = await tx.execute<{ available: string }>(
-            sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
-                FROM ${entries}
-                WHERE item_id = ${item.item_id}
-                  AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
-          );
-          const available = toDecimal(row?.available ?? "0");
-          // Physical weight only (see ornament branch) — wastage is profit, not gold.
-          if (available.lt(toDecimal(item.quantity))) {
-            throw new AppError(
-              "BUSINESS_RULE_VIOLATION",
-              `Insufficient stock for item ${itemMeta.name}. Available: ${available.toFixed(3)}g, Required: ${item.quantity}g`,
-            );
-          }
+    // Sequential, in key order — two bills locking the same lots always take the
+    // locks in the same order, so they queue instead of deadlocking.
+    const buckets = [...required.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, b]) => b);
+    for (const item of buckets) {
+      const itemMeta = dbItems.find(d => d.id === item.item_id)!;
+
+      if (itemMeta.type === "ORNAMENT") {
+        if (!item.lot_id) {
+          throw new AppError("VALIDATION_ERROR", `Lot ID is required for ornament: ${itemMeta.name}`);
         }
-      })
-    );
+        await tx.execute(
+          sql`SELECT id FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND lot_id = ${item.lot_id}
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
+              FOR UPDATE`,
+        );
+        const [row] = await tx.execute<{ available: string }>(
+          sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
+              FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND lot_id = ${item.lot_id}
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
+        );
+        const available = toDecimal(row?.available ?? "0");
+        // Only the PHYSICAL weight is checked/consumed — wastage is a profit
+        // line billed via pure_quantity, not physical gold leaving the lot.
+        if (available.lt(item.quantity)) {
+          throw new AppError(
+            "BUSINESS_RULE_VIOLATION",
+            `Insufficient stock for ornament ${itemMeta.name} in lot ${item.lot_id}. Available: ${available.toFixed(3)}g, Required: ${item.quantity.toFixed(3)}g`,
+          );
+        }
+      } else {
+        // GOLD (pooled mode)
+        await tx.execute(
+          sql`SELECT id FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})
+              FOR UPDATE`,
+        );
+        const [row] = await tx.execute<{ available: string }>(
+          sql`SELECT COALESCE(SUM(CASE WHEN to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} THEN quantity ELSE -quantity END), 0)::text AS available
+              FROM ${entries}
+              WHERE item_id = ${item.item_id}
+                AND (to_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID} OR from_account_id = ${SYSTEM_ACCOUNTS.SHOP_ID})`,
+        );
+        const available = toDecimal(row?.available ?? "0");
+        // Physical weight only (see ornament branch) — wastage is profit, not gold.
+        if (available.lt(item.quantity)) {
+          throw new AppError(
+            "BUSINESS_RULE_VIOLATION",
+            `Insufficient stock for item ${itemMeta.name}. Available: ${available.toFixed(3)}g, Required: ${item.quantity.toFixed(3)}g`,
+          );
+        }
+      }
+    }
     // Step 6 — Bill number per customer (uses tx so it's consistent with the insert)
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, input.account_id, "SALE");
 
