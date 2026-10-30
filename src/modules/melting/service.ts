@@ -6,7 +6,7 @@ import { toDecimal, toQuantityString, type Decimal } from "@/lib/decimal";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { reverseEntryGroup } from "@/lib/reversal";
 import { AppError } from "@/types/errors";
-import { computeAlloy, computeMeltLoss, type MeltLossResult } from "./alloy";
+import { computeAlloy, computeMeltLoss, type AlloyResult, type MeltLossResult } from "./alloy";
 import type {
   CreateMeltingInput,
   CreateMetalInput,
@@ -199,6 +199,8 @@ async function insertAlloys(
 //   output     : LOSS → SHOP  (output GOLD item, quantity = after_weight,
 //                              purity = out_touch; gold carries no lot)
 // The LOSS account's net is therefore exactly what was lost in the furnace.
+// A pending entry (given, not yet received) posts only the line legs, so the
+// gold sits in LOSS until it is received; receiving is an ordinary update.
 // Edit = reverse + re-post (same as Purchase/Sales), delete = reverse.
 
 const SHOP = SYSTEM_ACCOUNTS.SHOP_ID;
@@ -220,13 +222,15 @@ async function loadItems(tx: Tx, ids: string[]): Promise<Map<string, ItemMeta>> 
  * must name a lot (ornament stock is per lot); gold lines never carry one (gold
  * stock is one row per item AND touch — see getGoldStock).
  */
-function validateItems(lines: PreparedLine[], outputItemId: string, meta: Map<string, ItemMeta>) {
-  const out = meta.get(outputItemId);
-  if (!out || out.is_deleted) {
-    throw new AppError("NOT_FOUND", "Selected output item no longer exists", "output_item_id");
-  }
-  if (out.type !== "GOLD") {
-    throw new AppError("VALIDATION_ERROR", "Output item must be a Gold item", "output_item_id");
+function validateItems(lines: PreparedLine[], outputItemId: string | null, meta: Map<string, ItemMeta>) {
+  if (outputItemId !== null) {
+    const out = meta.get(outputItemId);
+    if (!out || out.is_deleted) {
+      throw new AppError("NOT_FOUND", "Selected output item no longer exists", "output_item_id");
+    }
+    if (out.type !== "GOLD") {
+      throw new AppError("VALIDATION_ERROR", "Output item must be a Gold item", "output_item_id");
+    }
   }
   return lines.map((l) => {
     const m = meta.get(l.item_id);
@@ -314,9 +318,8 @@ async function postMeltingGroup(
     date: string;
     remarks: string | null;
     lines: PreparedLine[];
-    outputItemId: string;
-    afterWeight: string;
-    outTouch: string;
+    /** Null while pending — only the lines leave SHOP. */
+    output: { itemId: string; afterWeight: string; outTouch: string } | null;
   },
 ) {
   const { group } = await createEntryGroup(
@@ -336,13 +339,17 @@ async function postMeltingGroup(
           quantity: l.weight,
           purity: l.touch,
         })),
-        {
-          fromAccountId: LOSS,
-          toAccountId: SHOP,
-          itemId: args.outputItemId,
-          quantity: args.afterWeight,
-          purity: args.outTouch,
-        },
+        ...(args.output
+          ? [
+              {
+                fromAccountId: LOSS,
+                toAccountId: SHOP,
+                itemId: args.output.itemId,
+                quantity: args.output.afterWeight,
+                purity: args.output.outTouch,
+              },
+            ]
+          : []),
       ],
     },
     tx,
@@ -393,31 +400,43 @@ async function prepare(tx: Tx, input: CreateMeltingInput) {
   if (input.metal_id) await assertMetalExists(tx, input.metal_id);
   await assertAlloyMetalsExist(tx, input.alloys);
   const computed = input.lines.map(computeLine);
-  const meta = await loadItems(tx, [...computed.map((l) => l.item_id), input.output_item_id]);
+  const meta = await loadItems(tx, [
+    ...computed.map((l) => l.item_id),
+    ...(input.output_item_id ? [input.output_item_id] : []),
+  ]);
   const lines = validateItems(computed, input.output_item_id, meta);
-  const calc = computeMeltLoss(lines, input.required_touch, input.alloys, input.after_weight);
-  return { lines, meta, calc };
+  // Pending (nothing received yet): alloy figures only, loss stays null.
+  const loss =
+    input.output_item_id !== null && input.after_weight !== null
+      ? computeMeltLoss(lines, input.required_touch, input.alloys, input.after_weight)
+      : null;
+  const calc: AlloyResult = loss ?? computeAlloy(lines, input.required_touch, input.alloys);
+  const output =
+    loss && input.output_item_id !== null
+      ? { itemId: input.output_item_id, afterWeight: loss.after_weight, outTouch: loss.out_touch }
+      : null;
+  return { lines, meta, calc, loss, output };
 }
 
-function entryValues(input: CreateMeltingInput, calc: MeltLossResult) {
+function entryValues(input: CreateMeltingInput, calc: AlloyResult, loss: MeltLossResult | null) {
   return {
     date: input.date,
     remarks: input.remarks?.trim() || null,
     required_touch: input.required_touch,
     final_weight: calc.final_weight,
     alloy_total: calc.alloy_total,
-    after_weight: calc.after_weight,
-    output_item_id: input.output_item_id,
-    out_touch: calc.out_touch,
-    expected_weight: calc.expected_weight,
-    loss_weight: calc.loss_weight,
-    pure_loss: calc.pure_loss,
+    after_weight: loss?.after_weight ?? null,
+    output_item_id: loss ? input.output_item_id : null,
+    out_touch: loss?.out_touch ?? null,
+    expected_weight: loss?.expected_weight ?? null,
+    loss_weight: loss?.loss_weight ?? null,
+    pure_loss: loss?.pure_loss ?? null,
   };
 }
 
 export async function createMelting(input: CreateMeltingInput) {
   return db.transaction(async (tx) => {
-    const { lines, meta, calc } = await prepare(tx, input);
+    const { lines, meta, calc, loss, output } = await prepare(tx, input);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('melting_entry_no'))`);
     const [nextRow] = await tx
       .select({ next: sql<number>`COALESCE(MAX(${meltingEntries.entry_no}), 0) + 1` })
@@ -425,15 +444,13 @@ export async function createMelting(input: CreateMeltingInput) {
     const entryNo = Number(nextRow?.next ?? 1);
 
     await assertStockAvailable(tx, lines, meta);
-    const values = entryValues(input, calc);
+    const values = entryValues(input, calc, loss);
     const groupId = await postMeltingGroup(tx, {
       entryNo,
       date: input.date,
       remarks: values.remarks,
       lines,
-      outputItemId: input.output_item_id,
-      afterWeight: calc.after_weight,
-      outTouch: calc.out_touch,
+      output,
     });
 
     const [entry] = await tx
@@ -467,8 +484,8 @@ export async function updateMelting(input: UpdateMeltingInput) {
       .limit(1)
       .for("update");
     if (!existing) throw new AppError("NOT_FOUND", "Melting entry not found");
-    const { lines, meta, calc } = await prepare(tx, input);
-    const values = entryValues(input, calc);
+    const { lines, meta, calc, loss, output } = await prepare(tx, input);
+    const values = entryValues(input, calc, loss);
 
     // Old stock movement comes back first, so the new lines can re-take the
     // same lots; a legacy (record-only) entry has nothing to reverse.
@@ -480,9 +497,7 @@ export async function updateMelting(input: UpdateMeltingInput) {
         date: input.date,
         remarks: values.remarks,
         lines,
-        outputItemId: input.output_item_id,
-        afterWeight: calc.after_weight,
-        outTouch: calc.out_touch,
+        output,
       });
     };
     if (existing.entry_group_id) {
@@ -564,10 +579,16 @@ async function fetchAlloys(meltingIds: string[]) {
     .orderBy(asc(meltingAlloys.melting_id), asc(meltingAlloys.sort_order));
 }
 
+// Given but not yet received: stock went out (group posted) and no melted gold
+// came back. Legacy record-only entries (no group) are never pending.
+const PENDING = sql`(${meltingEntries.entry_group_id} IS NOT NULL AND ${meltingEntries.output_item_id} IS NULL)`;
+
 export async function listMelting(input: ListMeltingInput) {
   const conds: SQL[] = [eq(meltingEntries.is_deleted, false)];
   if (input.from_date) conds.push(gte(meltingEntries.date, input.from_date));
   if (input.to_date) conds.push(lte(meltingEntries.date, input.to_date));
+  if (input.status === "pending") conds.push(PENDING);
+  if (input.status === "received") conds.push(sql`NOT ${PENDING}`);
   if (input.metal_id) {
     // Matches the legacy single metal OR any alloy metal on the entry.
     conds.push(
@@ -620,6 +641,7 @@ export async function listMelting(input: ListMeltingInput) {
       loss_weight: meltingEntries.loss_weight,
       pure_loss: meltingEntries.pure_loss,
       output_item_name: items.name,
+      is_pending: sql<boolean>`${PENDING}`,
       line_count: totals.line_count,
       total_weight: totals.total_weight,
       total_pure: totals.total_pure,
@@ -677,6 +699,7 @@ export async function getMeltingById(id: string) {
       expected_weight: meltingEntries.expected_weight,
       loss_weight: meltingEntries.loss_weight,
       pure_loss: meltingEntries.pure_loss,
+      is_pending: sql<boolean>`${PENDING}`,
     })
     .from(meltingEntries)
     .leftJoin(metals, eq(metals.id, meltingEntries.metal_id))

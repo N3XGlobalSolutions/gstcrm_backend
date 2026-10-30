@@ -91,20 +91,37 @@ const meltingBody = {
     "Required touch must be greater than 0 and at most 100",
   ),
   alloys: z.array(MeltingAlloySchema).optional().default([]),
-  // Melted gold goes back into SHOP stock under this GOLD item.
-  output_item_id: z.string().uuid("Select the output gold item"),
-  // Weight weighed after melting.
-  after_weight: decimalString("After weight").refine(
-    (v) => v !== "" && Number.parseFloat(v) > 0,
+  // RECEIVING side. Both blank = the gold is still in the furnace: the entry is
+  // saved as pending (lines leave SHOP, nothing comes back) and received later
+  // through update. Otherwise the melted gold goes back into SHOP stock under
+  // this GOLD item at this weight.
+  output_item_id: z
+    .string()
+    .uuid("Select the output gold item")
+    .nullish()
+    .transform((v) => v ?? null),
+  after_weight: optionalDecimal("After weight").refine(
+    (v) => v === null || Number.parseFloat(v) > 0,
     "After weight must be greater than zero",
   ),
   lines: z.array(MeltingLineSchema).min(1, "Add at least one line"),
 };
 
 function refineAlloys(
-  v: { required_touch: string | null; alloys: MeltingAlloyInput[] },
+  v: {
+    required_touch: string | null;
+    alloys: MeltingAlloyInput[];
+    output_item_id: string | null;
+    after_weight: string | null;
+  },
   ctx: z.RefinementCtx,
 ) {
+  if (v.output_item_id === null && v.after_weight !== null) {
+    ctx.addIssue({ code: "custom", path: ["output_item_id"], message: "Select the output gold item" });
+  }
+  if (v.output_item_id !== null && v.after_weight === null) {
+    ctx.addIssue({ code: "custom", path: ["after_weight"], message: "Enter the after melting weight" });
+  }
   if (v.alloys.length === 0) return;
   if (v.required_touch === null) {
     ctx.addIssue({
@@ -145,5 +162,7 @@ export const ListMeltingSchema = z.object({
   to_date: dateSchema.optional(),
   metal_id: z.string().uuid().optional(),
   search: z.string().trim().max(200).optional(),
+  // "pending" = given but not yet received; "received" = converted.
+  status: z.enum(["pending", "received"]).optional(),
 });
 export type ListMeltingInput = z.infer<typeof ListMeltingSchema>;
