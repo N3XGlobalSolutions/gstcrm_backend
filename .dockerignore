@@ -12,4 +12,4 @@ dist
 # Database dumps and log files must never be baked into the image
 # (the app creates both folders itself at runtime).
 backups
-logs
+/logs
