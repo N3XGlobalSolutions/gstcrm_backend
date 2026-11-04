@@ -3,6 +3,9 @@ import { z, ZodError } from "zod";
 import { formatZodError } from "@/lib/validationMessage";
 import type { Context } from "./context";
 import { checkPermission } from "@/lib/permissions";
+import { recordMutation } from "@/modules/logs/activity";
+import { runWithAuditContext } from "@/modules/audit/context";
+import { requiresAuditReason, AUDIT_REASON_REQUIRED_MESSAGE } from "@/modules/audit/reason";
 
 export const t = initTRPC.context<Context>().create({
   errorFormatter({ shape, error }) {
@@ -30,19 +33,53 @@ export const router = t.router;
 
 export const publicProcedure = t.procedure;
 
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
+export const protectedProcedure = t.procedure.use(async ({ ctx, next, path, type, getRawInput }) => {
   if (!ctx.user) {
     throw new TRPCError({
       code: "UNAUTHORIZED",
       message: "Authentication required. Please log in.",
     });
   }
-  return next({
-    ctx: {
-      ...ctx,
-      user: ctx.user,
+
+  // Editing / deleting a saved bill needs a reason (x-audit-reason header).
+  if (type === "mutation" && requiresAuditReason(path) && !ctx.auditReason) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: AUDIT_REASON_REQUIRED_MESSAGE });
+  }
+
+  // Every transaction opened while handling this call stamps who / why / from
+  // where onto the database's row-change history (data_audit_log triggers).
+  const user = ctx.user;
+  const result = await runWithAuditContext(
+    {
+      userId: user.id,
+      username: user.username,
+      ip: ctx.ip ?? null,
+      path,
+      reason: ctx.auditReason ?? null,
     },
-  });
+    () =>
+      next({
+        ctx: {
+          ...ctx,
+          user,
+        },
+      }),
+  );
+
+  // Activity log: every mutation (create / edit / delete ...), fire-and-forget.
+  if (type === "mutation") {
+    const input = await getRawInput().catch(() => undefined);
+    recordMutation({
+      ctx,
+      path,
+      ok: result.ok,
+      error: result.ok ? null : result.error.message,
+      input,
+      result: result.ok ? result.data : undefined,
+    });
+  }
+
+  return result;
 });
 
 export const superadminProcedure = protectedProcedure.use(({ ctx, next }) => {

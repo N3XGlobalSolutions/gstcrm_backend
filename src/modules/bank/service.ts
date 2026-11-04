@@ -406,19 +406,22 @@ export async function addBankFunds(
 ) {
   const bank = await requireBank(input.bankKey);
 
-  const [row] = await db
-    .insert(bankTransactions)
-    .values({
-      bank_key: bank.key,
-      bank_label: bank.label,
-      kind: input.direction === "CREDIT" ? "DEPOSIT" : "WITHDRAWAL",
-      direction: input.direction,
-      amount: input.amount,
-      date: input.date,
-      remarks: input.remarks?.trim() || null,
-      created_by: user?.username ?? null,
-    })
-    .returning();
+  // In a transaction so Bill & Data History stamps who made the change.
+  const [row] = await db.transaction((tx) =>
+    tx
+      .insert(bankTransactions)
+      .values({
+        bank_key: bank.key,
+        bank_label: bank.label,
+        kind: input.direction === "CREDIT" ? "DEPOSIT" : "WITHDRAWAL",
+        direction: input.direction,
+        amount: input.amount,
+        date: input.date,
+        remarks: input.remarks?.trim() || null,
+        created_by: user?.username ?? null,
+      })
+      .returning(),
+  );
 
   return row!;
 }

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import { db } from "@/db";
 import { appUsers, loginAttempts, refreshTokens } from "@/db/schema";
 import { eq, and, lt } from "drizzle-orm";
@@ -14,6 +14,17 @@ import { authMiddleware } from "@/middlewares/authMiddleware";
 import { loginRateLimiter } from "@/middlewares/rateLimit";
 import { LoginInputSchema } from "./schema";
 import { env } from "@/config/env";
+import { recordLoginEvent } from "@/modules/account/loginHistory";
+import {
+  DEVICE_COOKIE,
+  DEVICE_COOKIE_MAX_AGE_MS,
+  generateDeviceToken,
+  isValidDeviceToken,
+  upsertDevice,
+  touchDevice,
+} from "@/modules/account/devices";
+import { lookupIp } from "@/modules/account/geo";
+import { formatLocation, normalizeIp } from "@/modules/account/ip";
 
 const authRouter = Router();
 
@@ -35,6 +46,24 @@ const refreshCookieOptions = {
   sameSite: isProd ? ("none" as const) : ("lax" as const),
   path: "/api/auth",
 };
+
+// Browser identity for Login History (new-device flag; sha256 stored only).
+const deviceCookieOptions = {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
+  path: "/api/auth",
+  maxAge: DEVICE_COOKIE_MAX_AGE_MS,
+};
+
+/** The browser's device token; a new one is generated and set when missing / malformed. */
+function ensureDeviceToken(req: Request, res: Response): string {
+  const existing = ((req as Request & { cookies?: Record<string, string> }).cookies ?? {})[DEVICE_COOKIE];
+  if (isValidDeviceToken(existing)) return existing;
+  const token = generateDeviceToken();
+  res.cookie(DEVICE_COOKIE, token, deviceCookieOptions);
+  return token;
+}
 
 // ─── POST /login ──────────────────────────────────────────────────────────────
 
@@ -70,6 +99,15 @@ authRouter.post("/login", loginRateLimiter, async (req, res): Promise<void> => {
       .catch(() => undefined);
 
     if (!user || !valid) {
+      await recordLoginEvent({
+        userId: user?.id ?? null,
+        username: user?.username ?? username,
+        event: "login_failed",
+        reason: user ? "wrong_password" : "unknown_user",
+        method: "password",
+        ip,
+        userAgent,
+      });
       res.status(401).json({ message: "Invalid username or password" });
       return;
     }
@@ -79,10 +117,22 @@ authRouter.post("/login", loginRateLimiter, async (req, res): Promise<void> => {
       .where(and(eq(refreshTokens.user_id, user.id), lt(refreshTokens.expires_at, new Date())))
       .catch(() => undefined);
 
+    // Device recognition (Login History "new device")
+    const rawDevice = ensureDeviceToken(req, res);
+    const location = formatLocation(await lookupIp(ip));
+    const device = await upsertDevice({
+      userId: user.id,
+      rawToken: rawDevice,
+      ip: normalizeIp(ip),
+      userAgent,
+      location,
+    });
+
     const accessToken = signToken({
       id: user.id,
       username: user.username,
       user_group: user.user_group ?? "",
+      did: device.id,
     });
 
     const rawRefresh = generateRefreshToken();
@@ -96,7 +146,19 @@ authRouter.post("/login", loginRateLimiter, async (req, res): Promise<void> => {
       token_hash: hashRefreshToken(rawRefresh),
       ip,
       user_agent: userAgent,
+      device_id: device.id,
       expires_at: expiresAt,
+    });
+
+    await recordLoginEvent({
+      userId: user.id,
+      username: user.username,
+      event: "login_success",
+      method: "password",
+      ip,
+      userAgent,
+      deviceId: device.id,
+      newDevice: device.newDevice,
     });
 
     const refreshCookieOpts: Record<string, any> = { ...refreshCookieOptions };
@@ -183,13 +245,17 @@ authRouter.post("/refresh", async (req, res): Promise<void> => {
       token_hash: hashRefreshToken(newRawRefresh),
       ip,
       user_agent: userAgent,
+      device_id: stored.device_id,
       expires_at: expiresAt,
     });
+
+    if (stored.device_id) touchDevice(stored.device_id, normalizeIp(ip));
 
     const accessToken = signToken({
       id: user.id,
       username: user.username,
       user_group: user.user_group ?? "",
+      did: stored.device_id ?? null,
     });
 
     const refreshCookieOpts: Record<string, any> = { ...refreshCookieOptions };
@@ -214,13 +280,35 @@ authRouter.post("/refresh", async (req, res): Promise<void> => {
 
 // ─── POST /logout ─────────────────────────────────────────────────────────────
 
+// Deletes this browser's refresh token and logs a 'logout' event. The device
+// stays recognised (its cookie is kept).
+
 authRouter.post("/logout", async (req, res): Promise<void> => {
   const rawRefresh: string | undefined = (req as Request & { cookies: Record<string, string> }).cookies[REFRESH_COOKIE];
+  const ip = (req.ip ?? req.socket.remoteAddress ?? null) as string | null;
+  const userAgent = (req.headers["user-agent"] ?? null) as string | null;
 
   if (rawRefresh) {
-    db.delete(refreshTokens)
-      .where(eq(refreshTokens.token_hash, hashRefreshToken(rawRefresh)))
-      .catch(() => undefined);
+    (async () => {
+      const [row] = await db
+        .delete(refreshTokens)
+        .where(eq(refreshTokens.token_hash, hashRefreshToken(rawRefresh)))
+        .returning({ user_id: refreshTokens.user_id, device_id: refreshTokens.device_id });
+      if (!row) return;
+      const [user] = await db
+        .select({ username: appUsers.username })
+        .from(appUsers)
+        .where(eq(appUsers.id, row.user_id))
+        .limit(1);
+      await recordLoginEvent({
+        userId: row.user_id,
+        username: user?.username ?? "unknown",
+        event: "logout",
+        ip,
+        userAgent,
+        deviceId: row.device_id,
+      });
+    })().catch((err) => console.error("LOGOUT: failed to revoke token", err));
   }
 
   res

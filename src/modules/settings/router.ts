@@ -27,6 +27,34 @@ import bcrypt from "bcryptjs";
 import { env } from "@/config/env";
 import { generateEntryNo as genNo } from "@/lib/entryNoGenerator";
 import { createSystemNotification } from "@/modules/notifications/service";
+import { writeAuditLog, diffFields, type AuditEntry } from "@/modules/logs/audit";
+import { diffFormPermissions, diffActivityPermissions } from "@/modules/logs/helpers";
+
+// ─── Audit helpers ────────────────────────────────────────────────────────────
+
+type AuditCtx = {
+  user: { id: string; username: string };
+  ip?: string | null;
+  userAgent?: string | null;
+};
+
+/** actor / ip / user agent of the caller, for writeAuditLog. */
+function auditBy(ctx: AuditCtx): Pick<AuditEntry, "actor" | "ip" | "userAgent"> {
+  return {
+    actor: { id: ctx.user.id, username: ctx.user.username },
+    ip: ctx.ip ?? null,
+    userAgent: ctx.userAgent ?? null,
+  };
+}
+
+/** For changes that already happened outside a transaction: log, never fail the request. */
+async function auditAfter(entry: AuditEntry): Promise<void> {
+  try {
+    await writeAuditLog(entry);
+  } catch (err) {
+    console.error(`[audit] Failed to write "${entry.action}":`, err);
+  }
+}
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
@@ -46,17 +74,28 @@ const usersRouter = router({
   create: superadminProcedure
     .input(z.object({ username: z.string().min(2), user_group: z.string(), password: z.string().min(6) }))
     .mutation(async ({ input, ctx }) => {
-      const entry_no = await genNo(db, "app_users");
       const password_hash = await bcrypt.hash(input.password, env.BCRYPT_ROUNDS ?? 12);
-      const [user] = await db.insert(appUsers).values({ entry_no, username: input.username, user_group: input.user_group, password_hash }).returning({ id: appUsers.id, username: appUsers.username, user_group: appUsers.user_group });
-      
-      await createSystemNotification(
-        db,
-        `User '${input.username}' (${input.user_group}) was created by ${ctx.user.username}`,
-        ctx.user.id
-      );
+      return db.transaction(async (tx) => {
+        const entry_no = await genNo(tx, "app_users");
+        const [user] = await tx.insert(appUsers).values({ entry_no, username: input.username, user_group: input.user_group, password_hash }).returning({ id: appUsers.id, username: appUsers.username, user_group: appUsers.user_group });
 
-      return user!;
+        await writeAuditLog({
+          ...auditBy(ctx),
+          action: "user_created",
+          targetType: "user",
+          targetId: user!.id,
+          targetLabel: user!.username,
+          changes: diffFields(null, { username: user!.username, user_group: user!.user_group }, ["username", "user_group"]),
+        }, tx);
+
+        await createSystemNotification(
+          tx,
+          `User '${input.username}' (${input.user_group}) was created by ${ctx.user.username}`,
+          ctx.user.id
+        );
+
+        return user!;
+      });
     }),
 
   changePassword: superadminProcedure
@@ -88,8 +127,18 @@ const usersRouter = router({
       }
 
       const password_hash = await bcrypt.hash(input.new_password, env.BCRYPT_ROUNDS ?? 12);
-      await db.update(appUsers).set({ password_hash, updated_at: new Date() }).where(eq(appUsers.id, input.id));
-      
+      await db.transaction(async (tx) => {
+        await tx.update(appUsers).set({ password_hash, updated_at: new Date() }).where(eq(appUsers.id, input.id));
+
+        await writeAuditLog({
+          ...auditBy(ctx),
+          action: "password_reset_by_admin",
+          targetType: "user",
+          targetId: input.id,
+          targetLabel: existing.username,
+        }, tx);
+      });
+
       await createSystemNotification(
         db,
         `Password was changed for user '${existing.username}' by ${ctx.user.username}`,
@@ -102,16 +151,28 @@ const usersRouter = router({
   delete: superadminProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ input, ctx }) => {
-      const [existing] = await db.select({ username: appUsers.username }).from(appUsers).where(eq(appUsers.id, input.id)).limit(1);
-      await db.update(appUsers).set({ is_deleted: true, updated_at: new Date() }).where(eq(appUsers.id, input.id));
-      
-      if (existing) {
-        await createSystemNotification(
-          db,
-          `User '${existing.username}' was deleted by ${ctx.user.username}`,
-          ctx.user.id
-        );
-      }
+      await db.transaction(async (tx) => {
+        const [existing] = await tx.select({ username: appUsers.username, is_deleted: appUsers.is_deleted }).from(appUsers).where(eq(appUsers.id, input.id)).limit(1);
+        await tx.update(appUsers).set({ is_deleted: true, updated_at: new Date() }).where(eq(appUsers.id, input.id));
+
+        if (existing && !existing.is_deleted) {
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "user_deleted",
+            targetType: "user",
+            targetId: input.id,
+            targetLabel: existing.username,
+          }, tx);
+        }
+
+        if (existing) {
+          await createSystemNotification(
+            tx,
+            `User '${existing.username}' was deleted by ${ctx.user.username}`,
+            ctx.user.id
+          );
+        }
+      });
 
       return { success: true };
     }),
@@ -134,19 +195,40 @@ const permissionsRouter = router({
 
   saveFormPermissions: superadminProcedure
     .input(z.object({ userId: z.string().uuid(), permissions: z.array(z.object({ module: z.string(), form_name: z.string(), allowed: z.boolean() })) }))
-    .mutation(async ({ input }) => {
-      // Delete existing permissions for this user, then insert fresh set
-      await db.delete(userFormPermissions).where(eq(userFormPermissions.user_id, input.userId));
-      if (input.permissions.length > 0) {
-        await db.insert(userFormPermissions).values(
-          input.permissions.map((perm) => ({
-            user_id: input.userId,
-            module: perm.module,
-            form_name: perm.form_name,
-            allowed: perm.allowed,
-          })),
-        );
-      }
+    .mutation(async ({ input, ctx }) => {
+      await db.transaction(async (tx) => {
+        const before = await tx
+          .select({ module: userFormPermissions.module, form_name: userFormPermissions.form_name, allowed: userFormPermissions.allowed })
+          .from(userFormPermissions)
+          .where(eq(userFormPermissions.user_id, input.userId));
+
+        // Delete existing permissions for this user, then insert fresh set
+        await tx.delete(userFormPermissions).where(eq(userFormPermissions.user_id, input.userId));
+        if (input.permissions.length > 0) {
+          await tx.insert(userFormPermissions).values(
+            input.permissions.map((perm) => ({
+              user_id: input.userId,
+              module: perm.module,
+              form_name: perm.form_name,
+              allowed: perm.allowed,
+            })),
+          );
+        }
+
+        // Audit only the forms that were switched on / off.
+        const changes = diffFormPermissions(before, input.permissions);
+        if (changes.length) {
+          const [target] = await tx.select({ username: appUsers.username }).from(appUsers).where(eq(appUsers.id, input.userId)).limit(1);
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "form_permissions_changed",
+            targetType: "permissions",
+            targetId: input.userId,
+            targetLabel: target?.username ?? null,
+            changes,
+          }, tx);
+        }
+      });
       return { success: true };
     }),
 
@@ -165,14 +247,35 @@ const permissionsRouter = router({
 
   saveActivityPermissions: superadminProcedure
     .input(z.object({ userId: z.string().uuid(), can_view: z.boolean(), can_edit: z.boolean(), can_delete: z.boolean() }))
-    .mutation(async ({ input }) => {
-      // Delete existing activity permissions for this user, then insert fresh
-      await db.delete(userActivityPermissions).where(eq(userActivityPermissions.user_id, input.userId));
-      await db.insert(userActivityPermissions).values({
-        user_id: input.userId,
-        can_view: input.can_view,
-        can_edit: input.can_edit,
-        can_delete: input.can_delete,
+    .mutation(async ({ input, ctx }) => {
+      await db.transaction(async (tx) => {
+        const [before] = await tx
+          .select({ can_view: userActivityPermissions.can_view, can_edit: userActivityPermissions.can_edit, can_delete: userActivityPermissions.can_delete })
+          .from(userActivityPermissions)
+          .where(eq(userActivityPermissions.user_id, input.userId))
+          .limit(1);
+
+        // Delete existing activity permissions for this user, then insert fresh
+        await tx.delete(userActivityPermissions).where(eq(userActivityPermissions.user_id, input.userId));
+        await tx.insert(userActivityPermissions).values({
+          user_id: input.userId,
+          can_view: input.can_view,
+          can_edit: input.can_edit,
+          can_delete: input.can_delete,
+        });
+
+        const changes = diffActivityPermissions(before, input);
+        if (changes.length) {
+          const [target] = await tx.select({ username: appUsers.username }).from(appUsers).where(eq(appUsers.id, input.userId)).limit(1);
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "activity_permissions_changed",
+            targetType: "permissions",
+            targetId: input.userId,
+            targetLabel: target?.username ?? null,
+            changes,
+          }, tx);
+        }
       });
       return { success: true };
     }),
@@ -212,7 +315,7 @@ const companyRouter = router({
       defaultTdsPercent: z.string().optional(),
       defaultTcsPercent: z.string().optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       // Keep old fields synced for compatibility
       const company_name = input.businessName || input.company_name || "";
       const phone = input.phoneNumber || input.phone;
@@ -234,18 +337,59 @@ const companyRouter = router({
         updated_at: new Date()
       };
 
-      const [existing] = await db.select({ id: companyDetails.id }).from(companyDetails).limit(1);
-      if (existing) {
-        const [row] = await db.update(companyDetails).set(valuesToSave).where(eq(companyDetails.id, existing.id)).returning();
-        return row!;
-      }
-      const [row] = await db.insert(companyDetails).values({
-        ...valuesToSave,
-        updated_at: new Date()
-      }).returning();
-      return row!;
+      return db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(companyDetails).limit(1);
+        let row: typeof companyDetails.$inferSelect;
+        if (existing) {
+          [row] = (await tx.update(companyDetails).set(valuesToSave).where(eq(companyDetails.id, existing.id)).returning()) as [typeof companyDetails.$inferSelect];
+        } else {
+          [row] = (await tx.insert(companyDetails).values({
+            ...valuesToSave,
+            updated_at: new Date()
+          }).returning()) as [typeof companyDetails.$inferSelect];
+        }
+
+        const changes = diffFields(existing ?? null, row, COMPANY_AUDIT_FIELDS);
+        if (changes.length) {
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "company_details_changed",
+            targetType: "company_details",
+            targetId: row.id,
+            targetLabel: row.businessName || row.company_name || "Company details",
+            changes,
+          }, tx);
+        }
+        return row;
+      });
     }),
 });
+
+/** Company columns compared for the audit log (all user-editable ones). */
+const COMPANY_AUDIT_FIELDS: (keyof typeof companyDetails.$inferSelect & string)[] = [
+  "businessName",
+  "company_name",
+  "addressLine1",
+  "address",
+  "city",
+  "pincode",
+  "state",
+  "stateCode",
+  "country",
+  "phoneNumber",
+  "phone",
+  "email",
+  "gstin",
+  "gst_no",
+  "panNumber",
+  "pan_no",
+  "placeOfSupply",
+  "businessType",
+  "bank_details",
+  "logo_url",
+  "defaultTdsPercent",
+  "defaultTcsPercent",
+];
 
 // ─── Backup ───────────────────────────────────────────────────────────────────
 
@@ -259,7 +403,7 @@ const backupRouter = router({
         format: z.enum(["JSON"]).optional(),
       }).optional()
     )
-    .mutation(async () => {
+    .mutation(async ({ ctx }) => {
       // Get all table names in the public schema
       const tables = await db.execute(sql`
         SELECT table_name 
@@ -323,6 +467,13 @@ const backupRouter = router({
         console.error("Failed to write backup to disk", e);
       }
 
+      await auditAfter({
+        ...auditBy(ctx),
+        action: "backup_created",
+        targetType: "settings",
+        targetLabel: filename,
+      });
+
       // Return the encrypted dump payload
       return { success: true, filename, data: payload };
     }),
@@ -382,6 +533,13 @@ const backupRouter = router({
           sql`UPDATE accounts SET opening_pure_balance = '0', opening_cash_balance = '0'`
         );
         console.log(`✅ Account opening balances reset to zero`);
+
+        await writeAuditLog({
+          ...auditBy(ctx),
+          action: "factory_reset",
+          targetType: "settings",
+          targetLabel: "Transactions wiped (master data kept)",
+        }, tx);
       });
 
       console.log(`✅ Factory reset complete — master data preserved`);
@@ -408,65 +566,107 @@ const taxMasterRouter = router({
 
   create: protectedProcedure
     .input(CreateTaxMasterSchema)
-    .mutation(async ({ input }) => {
-      const entry_no = await generateEntryNo(db, "tax_master");
-      const [newTax] = await db
-        .insert(taxMaster)
-        .values({
-          entry_no,
-          category: input.category,
-          name: input.name,
-          code: input.code || null,
-          percentage: input.percentage,
-        })
-        .returning();
-      return newTax!;
+    .mutation(async ({ input, ctx }) => {
+      return db.transaction(async (tx) => {
+        const entry_no = await generateEntryNo(tx, "tax_master");
+        const [newTax] = await tx
+          .insert(taxMaster)
+          .values({
+            entry_no,
+            category: input.category,
+            name: input.name,
+            code: input.code || null,
+            percentage: input.percentage,
+          })
+          .returning();
+
+        await writeAuditLog({
+          ...auditBy(ctx),
+          action: "tax_master_created",
+          targetType: "tax_master",
+          targetId: newTax!.id,
+          targetLabel: newTax!.name,
+          changes: diffFields(null, newTax!, TAX_AUDIT_FIELDS),
+        }, tx);
+        return newTax!;
+      });
     }),
 
   update: protectedProcedure
     .input(UpdateTaxMasterSchema)
-    .mutation(async ({ input }) => {
-      const [updated] = await db
-        .update(taxMaster)
-        .set({
-          name: input.name,
-          code: input.code || null,
-          percentage: input.percentage,
-          updated_at: new Date(),
-        })
-        .where(eq(taxMaster.id, input.id))
-        .returning();
-      
-      if (!updated) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Tax record not found",
-        });
-      }
-      return updated;
+    .mutation(async ({ input, ctx }) => {
+      return db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(taxMaster).where(eq(taxMaster.id, input.id)).limit(1);
+        const [updated] = await tx
+          .update(taxMaster)
+          .set({
+            name: input.name,
+            code: input.code || null,
+            percentage: input.percentage,
+            updated_at: new Date(),
+          })
+          .where(eq(taxMaster.id, input.id))
+          .returning();
+
+        if (!updated) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Tax record not found",
+          });
+        }
+
+        const changes = diffFields(existing ?? null, updated, TAX_AUDIT_FIELDS);
+        if (changes.length) {
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "tax_master_changed",
+            targetType: "tax_master",
+            targetId: updated.id,
+            targetLabel: updated.name,
+            changes,
+          }, tx);
+        }
+        return updated;
+      });
     }),
 
   delete: protectedProcedure
     .input(DeleteTaxMasterSchema)
-    .mutation(async ({ input }) => {
-      const [deleted] = await db
-        .update(taxMaster)
-        .set({
-          is_deleted: true,
-          updated_at: new Date(),
-        })
-        .where(eq(taxMaster.id, input.id))
-        .returning();
-      
-      if (!deleted) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Tax record not found",
-        });
-      }
-      return { success: true };
+    .mutation(async ({ input, ctx }) => {
+      return db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(taxMaster).where(eq(taxMaster.id, input.id)).limit(1);
+        const [deleted] = await tx
+          .update(taxMaster)
+          .set({
+            is_deleted: true,
+            updated_at: new Date(),
+          })
+          .where(eq(taxMaster.id, input.id))
+          .returning();
+
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Tax record not found",
+          });
+        }
+
+        if (!existing?.is_deleted) {
+          await writeAuditLog({
+            ...auditBy(ctx),
+            action: "tax_master_deleted",
+            targetType: "tax_master",
+            targetId: deleted.id,
+            targetLabel: deleted.name,
+            changes: diffFields(existing, null, TAX_AUDIT_FIELDS),
+          }, tx);
+        }
+        return { success: true };
+      });
     }),
 });
+
+const TAX_AUDIT_FIELDS: (keyof typeof taxMaster.$inferSelect & string)[] = ["category", "name", "code", "percentage"];
 
 // ─── Settings root router ─────────────────────────────────────────────────────
 

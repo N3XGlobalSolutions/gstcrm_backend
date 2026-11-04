@@ -4,6 +4,7 @@ import { timingSafeEqual } from "crypto";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { generateEntryNo } from "@/lib/entryNoGenerator";
+import { runWithAuditContext } from "@/modules/audit/context";
 
 export const syncRouter = Router();
 
@@ -48,7 +49,15 @@ syncRouter.post("/account", async (req: Request, res: Response): Promise<void> =
   try {
     // One transaction so the existence check, entry_no generation and write cannot
     // interleave with a concurrent local account creation.
-    const action = await db.transaction(async (tx) => {
+    // Bill & Data History records this change as made by "remote-sync".
+    const auditActor = {
+      userId: null,
+      username: "remote-sync",
+      ip: (req.ip ?? null) as string | null,
+      path: "/api/sync/account",
+      reason: null,
+    };
+    const action = await runWithAuditContext(auditActor, () => db.transaction(async (tx) => {
       const existing: any = await tx.execute(
         sql`SELECT id FROM accounts WHERE id = ${payload.id} LIMIT 1`
       );
@@ -108,7 +117,7 @@ syncRouter.post("/account", async (req: Request, res: Response): Promise<void> =
       `);
 
       return "created";
-    });
+    }));
 
     res.json({ success: true, action, id: payload.id });
   } catch (err: any) {

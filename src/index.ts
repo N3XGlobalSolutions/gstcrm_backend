@@ -5,6 +5,8 @@ import { db } from "./db";
 import { sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ensureSystemAccountsAndItems } from "./db/seed";
+import { startLogRetentionJob } from "./modules/logs/retention";
+import { startAuditSealerJob } from "./modules/audit/sealer";
 
 // ─── Neon Keep-Alive Ping ──────────────────────────────────────────────────────
 function startKeepAlive() {
@@ -40,6 +42,12 @@ async function start() {
       `✅ Gold Billing Server running on port ${env.PORT} (${env.NODE_ENV})`,
     );
     startKeepAlive();
+    // Daily cleanup of old login history / activity / audit rows (LOG_RETENTION_DAYS).
+    if (env.NODE_ENV !== "test") {
+      startLogRetentionJob();
+      // Seal new Bill & Data History / audit log rows into their hash chains every 60s.
+      startAuditSealerJob();
+    }
   });
 }
 

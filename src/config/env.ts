@@ -20,6 +20,20 @@ const envSchema = z.object({
     .default("development"),
   BCRYPT_ROUNDS: z.string().default("12"),
   BACKUP_ENCRYPTION_PASSWORD: z.string().min(6, "BACKUP_ENCRYPTION_PASSWORD must be at least 6 characters"),
+  // Login location: path to a MaxMind GeoLite2-City.mmdb file. Missing file → no city/country.
+  GEOIP_DB_PATH: z.string().default("./geoip/GeoLite2-City.mmdb"),
+  // Login history / activity / audit rows older than this are deleted daily.
+  LOG_RETENTION_DAYS: z.string().default("365"),
+  // Bill / data change history (data_audit_log) — 8 years by default (GST / IT records).
+  DATA_AUDIT_RETENTION_DAYS: z.string().default("2922"),
+  // Secret for the audit hash chain (HMAC-SHA256). Missing → un-keyed SHA-256 + warning.
+  AUDIT_CHAIN_KEY: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z
+      .string()
+      .regex(/^[0-9a-fA-F]{64}$/, "AUDIT_CHAIN_KEY must be 64 hex characters (openssl rand -hex 32)")
+      .optional(),
+  ),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -35,5 +49,7 @@ export const env = {
   PORT: Number(parsed.data.PORT),
   BCRYPT_ROUNDS: Number(parsed.data.BCRYPT_ROUNDS),
   REFRESH_TOKEN_EXPIRES_IN_DAYS: Number(parsed.data.REFRESH_TOKEN_EXPIRES_IN_DAYS),
+  LOG_RETENTION_DAYS: Number(parsed.data.LOG_RETENTION_DAYS),
+  DATA_AUDIT_RETENTION_DAYS: Number(parsed.data.DATA_AUDIT_RETENTION_DAYS),
   IS_PROD: parsed.data.NODE_ENV === "production",
 };

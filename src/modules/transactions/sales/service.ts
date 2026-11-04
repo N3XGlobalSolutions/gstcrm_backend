@@ -350,17 +350,20 @@ export async function settleSalePayment(input: z.infer<typeof SettleSalePaymentS
 
   const remarks = input.method === "CASH" ? "Cash" : input.bank_details!.trim();
 
-  const [inserted] = await db
-    .insert(entriesTable)
-    .values({
-      group_id: input.id,
-      from_account_id: status.group.account_id,
-      to_account_id: SYSTEM_ACCOUNTS.SHOP_ID,
-      item_id: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-      quantity: amount.toFixed(2),
-      remarks,
-    })
-    .returning();
+  // In a transaction so Bill & Data History stamps who recorded the payment.
+  const [inserted] = await db.transaction((tx) =>
+    tx
+      .insert(entriesTable)
+      .values({
+        group_id: input.id,
+        from_account_id: status.group.account_id,
+        to_account_id: SYSTEM_ACCOUNTS.SHOP_ID,
+        item_id: SYSTEM_ITEMS.RUPEE_ITEM_ID,
+        quantity: amount.toFixed(2),
+        remarks,
+      })
+      .returning(),
+  );
 
   if (!inserted) throw new AppError("INTERNAL_ERROR", "Failed to record payment");
 

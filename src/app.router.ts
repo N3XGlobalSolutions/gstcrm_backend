@@ -14,6 +14,8 @@ import { settingsRouter } from "@/modules/settings/router";
 import { goldRateRouter } from "@/modules/goldRate/router";
 import { reportsRouter } from "@/modules/reports/router";
 import { meltingRouter } from "@/modules/melting/router";
+import { logsRouter } from "@/modules/logs/router";
+import { dataAuditRouter } from "@/modules/audit/router";
 
 export const appRouter = router({
   system: router({
@@ -42,6 +44,10 @@ export const appRouter = router({
   goldRate: goldRateRouter,
   reports: reportsRouter,
   melting: meltingRouter,
+  // Settings › Logs (superadmin): Login History, Activity, Audit log
+  logs: logsRouter,
+  // Settings › Logs › Bill & Data History (row-level change history + hash chain)
+  dataAudit: dataAuditRouter,
 });
 
 export type AppRouter = typeof appRouter;

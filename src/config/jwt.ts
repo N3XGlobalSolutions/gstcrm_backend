@@ -6,6 +6,9 @@ export interface JwtPayload {
   id: string;
   username: string;
   user_group: string;
+  // The browser (user_devices.id) this session belongs to (Login History).
+  // Absent on tokens issued before device recognition.
+  did?: string | null;
 }
 
 export function signToken(payload: JwtPayload): string {

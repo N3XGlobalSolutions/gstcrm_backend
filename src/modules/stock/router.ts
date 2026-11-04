@@ -412,15 +412,17 @@ async function deleteStockByLot(input: z.infer<typeof DeleteByLotSchema>) {
     // so getLotBalances still shows a positive balance. Fix by backfilling lot_id.
     const reversalGroupId = group.reversed_by;
     if (reversalGroupId) {
-      await db
-        .update(entriesTable)
-        .set({ lot_id: input.lot_id })
-        .where(
-          and(
-            eq(entriesTable.group_id, reversalGroupId),
-            isNull(entriesTable.lot_id),
+      await db.transaction((tx) =>
+        tx
+          .update(entriesTable)
+          .set({ lot_id: input.lot_id })
+          .where(
+            and(
+              eq(entriesTable.group_id, reversalGroupId),
+              isNull(entriesTable.lot_id),
+            ),
           ),
-        );
+      );
     }
     return { success: true };
   }

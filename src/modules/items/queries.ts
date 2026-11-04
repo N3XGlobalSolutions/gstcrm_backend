@@ -85,29 +85,36 @@ export async function insertItem(values: {
   touch?: number | null;
 }) {
   const { touch, ...rest } = values;
-  const [item] = await db
-    .insert(items)
-    .values({ ...rest, touch: touch != null ? String(touch) : undefined })
-    .returning();
+  // In a transaction so Bill & Data History stamps who made the change.
+  const [item] = await db.transaction((tx) =>
+    tx
+      .insert(items)
+      .values({ ...rest, touch: touch != null ? String(touch) : undefined })
+      .returning(),
+  );
   return item!;
 }
 
 // ─── updateItem ──────────────────────────────────────────────────────────────
 
 export async function updateItemName(id: string, name: string, touch?: number | null) {
-  const [item] = await db
-    .update(items)
-    .set({ name, touch: touch !== undefined ? String(touch) : undefined, updated_at: new Date() })
-    .where(eq(items.id, id))
-    .returning();
+  const [item] = await db.transaction((tx) =>
+    tx
+      .update(items)
+      .set({ name, touch: touch !== undefined ? String(touch) : undefined, updated_at: new Date() })
+      .where(eq(items.id, id))
+      .returning(),
+  );
   return item!;
 }
 
 // ─── softDeleteItem ──────────────────────────────────────────────────────────
 
 export async function softDeleteItem(id: string) {
-  await db
-    .update(items)
-    .set({ is_deleted: true, updated_at: new Date() })
-    .where(eq(items.id, id));
+  await db.transaction((tx) =>
+    tx
+      .update(items)
+      .set({ is_deleted: true, updated_at: new Date() })
+      .where(eq(items.id, id)),
+  );
 }

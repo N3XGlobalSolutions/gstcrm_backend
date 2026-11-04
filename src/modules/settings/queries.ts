@@ -22,19 +22,24 @@ export async function upsertCompanyDetails(
   data: Partial<typeof companyDetails.$inferInsert>,
 ) {
   const existing = await getCompanyDetails();
+  // In a transaction so Bill & Data History stamps who made the change.
   if (existing) {
-    const [row] = await db
-      .update(companyDetails)
-      .set({ ...data, updated_at: new Date() })
-      .where(eq(companyDetails.id, existing.id))
-      .returning();
+    const [row] = await db.transaction((tx) =>
+      tx
+        .update(companyDetails)
+        .set({ ...data, updated_at: new Date() })
+        .where(eq(companyDetails.id, existing.id))
+        .returning(),
+    );
     return row!;
   }
   const { v4: uuidv4 } = await import("uuid");
-  const [row] = await db
-    .insert(companyDetails)
-    .values({ id: uuidv4(), ...data })
-    .returning();
+  const [row] = await db.transaction((tx) =>
+    tx
+      .insert(companyDetails)
+      .values({ id: uuidv4(), ...data })
+      .returning(),
+  );
   return row!;
 }
 

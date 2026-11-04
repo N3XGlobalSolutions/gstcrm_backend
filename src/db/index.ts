@@ -3,6 +3,8 @@ import { env } from "@/config/env";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
+import { sql } from "drizzle-orm";
+import { getAuditContext, auditSettingValues } from "@/modules/audit/context";
 
 // Extract the hostname from DATABASE_URL for the DNS override
 function getNeonHostname(): string | null {
@@ -63,6 +65,30 @@ const connection = postgres(env.DATABASE_URL, {
 
 // Create the Drizzle client with the full schema
 export const db = drizzle(connection, { schema });
+
+// ─── Data audit: stamp the actor on every transaction ─────────────────────────
+// The gstcrm_audit_row() trigger (migration 0025) reads gstcrm.user_id /
+// username / ip / path / reason to record who made each change. When the request
+// runs inside runWithAuditContext (protectedProcedure), the first statement of
+// every top-level transaction copies that actor into TRANSACTION-LOCAL settings
+// (set_config(..., true)) — the only form safe behind Neon's transaction-mode
+// pooler. Nested tx.transaction() savepoints are untouched (same transaction).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const rawTransaction = db.transaction.bind(db);
+db.transaction = ((fn: Parameters<typeof rawTransaction>[0], config?: Parameters<typeof rawTransaction>[1]) => {
+  // Read the actor now, in the caller's async context (not inside the driver's callback).
+  const store = getAuditContext();
+  return rawTransaction(async (tx) => {
+    if (store) {
+      const v = auditSettingValues(store);
+      const userId = UUID_RE.test(v.userId) ? v.userId : "";
+      await tx.execute(
+        sql`select set_config('gstcrm.user_id', ${userId}, true), set_config('gstcrm.username', ${v.username}, true), set_config('gstcrm.ip', ${v.ip}, true), set_config('gstcrm.path', ${v.path}, true), set_config('gstcrm.reason', ${v.reason}, true)`,
+      );
+    }
+    return fn(tx);
+  }, config);
+}) as typeof db.transaction;
 
 // Export schema for direct use in queries
 export { schema };

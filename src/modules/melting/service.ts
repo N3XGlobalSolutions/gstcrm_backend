@@ -55,10 +55,9 @@ export async function createMetal(input: CreateMetalInput) {
   const name = input.name.trim();
   await assertMetalNameFree(name);
   try {
-    const [row] = await db
-      .insert(metals)
-      .values({ name })
-      .returning({ id: metals.id, name: metals.name });
+    const [row] = await db.transaction((tx) =>
+      tx.insert(metals).values({ name }).returning({ id: metals.id, name: metals.name }),
+    );
     return row!;
   } catch (err) {
     // Lost a race with a concurrent create of the same name.
@@ -71,11 +70,13 @@ export async function updateMetal(input: UpdateMetalInput) {
   const name = input.name.trim();
   await assertMetalNameFree(name, input.id);
   try {
-    const [row] = await db
-      .update(metals)
-      .set({ name, updated_at: new Date() })
-      .where(eq(metals.id, input.id))
-      .returning({ id: metals.id, name: metals.name });
+    const [row] = await db.transaction((tx) =>
+      tx
+        .update(metals)
+        .set({ name, updated_at: new Date() })
+        .where(eq(metals.id, input.id))
+        .returning({ id: metals.id, name: metals.name }),
+    );
     if (!row) throw new AppError("NOT_FOUND", "Metal not found");
     return row;
   } catch (err) {
@@ -117,7 +118,9 @@ export async function deleteMetal(id: string) {
       "Metal is referenced by deleted melting entries and cannot be removed",
     );
   }
-  const [row] = await db.delete(metals).where(eq(metals.id, id)).returning({ id: metals.id });
+  const [row] = await db.transaction((tx) =>
+    tx.delete(metals).where(eq(metals.id, id)).returning({ id: metals.id }),
+  );
   if (!row) throw new AppError("NOT_FOUND", "Metal not found");
   return { success: true as const };
 }

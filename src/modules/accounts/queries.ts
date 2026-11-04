@@ -73,21 +73,26 @@ export async function updateAccount(
   id: string,
   values: Partial<typeof accounts.$inferInsert>,
 ) {
-  const [account] = await db
-    .update(accounts)
-    .set({ ...values, updated_at: new Date() })
-    .where(eq(accounts.id, id))
-    .returning();
+  // In a transaction so Bill & Data History stamps who made the change.
+  const [account] = await db.transaction((tx) =>
+    tx
+      .update(accounts)
+      .set({ ...values, updated_at: new Date() })
+      .where(eq(accounts.id, id))
+      .returning(),
+  );
   return account!;
 }
 
 // ─── softDeleteAccount ───────────────────────────────────────────────────────
 
 export async function softDeleteAccount(id: string) {
-  await db
-    .update(accounts)
-    .set({ is_deleted: true, updated_at: new Date() })
-    .where(eq(accounts.id, id));
+  await db.transaction((tx) =>
+    tx
+      .update(accounts)
+      .set({ is_deleted: true, updated_at: new Date() })
+      .where(eq(accounts.id, id)),
+  );
 }
 
 // ─── findAccountByName ───────────────────────────────────────────────────────

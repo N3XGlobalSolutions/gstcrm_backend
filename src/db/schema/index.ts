@@ -14,3 +14,5 @@ export * from "./job-work-cycles";
 export * from "./bank-transactions";
 export * from "./melting";
 
+export * from "./security-logs";
+export * from "./data-audit";

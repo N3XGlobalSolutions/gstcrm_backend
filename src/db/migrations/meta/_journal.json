@@ -169,6 +169,20 @@
       "when": 1791600000000,
       "tag": "0023_melting_stock",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793792914400,
+      "tag": "0024_security_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793792935881,
+      "tag": "0025_data_audit",
+      "breakpoints": true
     }
   ]
 }
