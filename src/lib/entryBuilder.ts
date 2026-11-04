@@ -6,7 +6,7 @@ import {
   accounts as accountsTable,
   type wastageModeEnum,
 } from "@/db/schema";
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import {
   calcPure,
   calcWastagePercent,
@@ -70,6 +70,11 @@ export interface CreateEntryGroupInput {
   tdsAmount?: string;
   tcsAmount?: string;
   gstAmount?: string;
+  // Back-date the group + its entries (used when editing an OLD bill so the
+  // recreated bill keeps its place in the ledger instead of jumping to "now").
+  // Copied straight from that group's row in SQL — NOT via a JS Date, which
+  // would truncate Postgres' microseconds and land the copy up to 1 ms early.
+  createdAtFromGroupId?: string;
   entries: EntryInput[];
 }
 
@@ -122,6 +127,9 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         tds_amount: input.tdsAmount,
         tcs_amount: input.tcsAmount,
         gst_amount: input.gstAmount,
+        ...(input.createdAtFromGroupId
+          ? { created_at: sql`(SELECT created_at FROM entry_groups WHERE id = ${input.createdAtFromGroupId})` }
+          : {}),
       })
       .returning();
 
@@ -254,6 +262,9 @@ export async function createEntryGroup(input: CreateEntryGroupInput, externalTx?
         average_touch: averageTouch,
         remarks: entry.remarks,
         piece_count: entry.pieceCount,
+        ...(input.createdAtFromGroupId
+          ? { created_at: sql`(SELECT created_at FROM entry_groups WHERE id = ${input.createdAtFromGroupId})` }
+          : {}),
       });
     }
 

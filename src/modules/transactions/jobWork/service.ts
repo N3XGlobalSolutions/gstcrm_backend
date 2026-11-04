@@ -252,7 +252,7 @@ export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
 
 export async function createJobWork(
   input: z.infer<typeof CreateJobWorkSchema>,
-  options?: { existingBillNo?: number; existingEntryNo?: number }
+  options?: { existingBillNo?: number; existingEntryNo?: number; createdAtFromGroupId?: string }
 ) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   const validated = CreateJobWorkSchema.parse(input);
@@ -497,6 +497,7 @@ export async function createJobWork(
     jobWorkCycleId: input.bill_cycle_id,
     tdsAmount: input.tds_amount,
     tcsAmount: input.tcs_amount,
+    createdAtFromGroupId: options?.createdAtFromGroupId,
     entries,
   });
 
@@ -513,6 +514,7 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
     .select({
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
+      created_at: entryGroups.created_at,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
@@ -522,11 +524,15 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
     throw new AppError("NOT_FOUND", "Job work not found");
   }
 
-  await reverseEntryGroup(input.id);
+  // Any bill (not just the latest) can be edited. The reversal and the new
+  // version both keep the original timestamp, so the bill stays in place and
+  // every later bill's opening balance picks up the change automatically.
+  await reverseEntryGroup(input.id, undefined, { backdate: true });
   const { id: _removed, ...createInput } = input;
   return createJobWork(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
+    createdAtFromGroupId: input.id,
   });
 }
 

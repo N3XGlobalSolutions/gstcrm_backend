@@ -21,7 +21,11 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * @param externalTx - Optional caller transaction, so a reverse + re-post (e.g.
  *   a melting edit) commits or rolls back as one unit. Omitted = own transaction.
  */
-export async function reverseEntryGroup(originalGroupId: string, externalTx?: Tx) {
+export async function reverseEntryGroup(
+  originalGroupId: string,
+  externalTx?: Tx,
+  opts?: { backdate?: boolean },
+) {
   const run = async (tx: Tx) => {
     // Step 1 — Fetch original group
     const [original] = await tx
@@ -57,6 +61,9 @@ export async function reverseEntryGroup(originalGroupId: string, externalTx?: Tx
       ratePerGram: original.rate_per_gram ?? undefined,
       reversalOf: originalGroupId,
       remarks: original.remarks ?? undefined,
+      // backdate: post the reversal at the original bill's timestamp so bills
+      // dated after it never see the old + new versions at the same time.
+      createdAtFromGroupId: opts?.backdate ? originalGroupId : undefined,
       entries: originalEntries.map((e) => ({
         fromAccountId: e.to_account_id, // swapped
         toAccountId: e.from_account_id, // swapped
