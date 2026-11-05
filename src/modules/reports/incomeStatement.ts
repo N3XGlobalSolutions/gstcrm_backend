@@ -3,6 +3,7 @@
  *
  *   Sales revenue  (wastage grams billed × rate, net of discount)
  *   + Labour income (wastage grams on Ornament Issue rows × rate — same basis as sales)
+ *   − Purchase cost (wastage % charged by suppliers on Purchase → Ornament rows)
  *   − Operating expenses
  *   = Net profit
  *
@@ -25,6 +26,7 @@ import { toDecimal } from "@/lib/decimal";
 import { SYSTEM_ACCOUNTS, SYSTEM_ITEMS } from "@/config/constants";
 import { resolveDateRange, type DateRangeInput } from "@/lib/dateRange";
 import { computeWeightedAverageCogs, type CostEvent } from "./cogs";
+import { sumPurchaseWastage, type PurchaseWastageRow } from "./purchaseWastage";
 import { sql } from "drizzle-orm";
 
 const SHOP = SYSTEM_ACCOUNTS.SHOP_ID;
@@ -103,7 +105,7 @@ export async function getIncomeStatement(input: IncomeStatementInput) {
   const events = await getCostEvents();
   const cogs = computeWeightedAverageCogs(events, { from, to });
 
-  const [discountRow, labourRow, wastageRow, labourWastageRow, expenseRow, taxRow] = await Promise.all([
+  const [discountRow, labourRow, wastageRow, labourWastageRow, purchaseWastageRows, expenseRow, taxRow] = await Promise.all([
     // Sale discounts given in-period (RUPEE 'Discount' lines on SALE groups).
     db.execute<{ total: string | null }>(sql`
       SELECT COALESCE(SUM(e.quantity), 0)::text AS total
@@ -150,6 +152,23 @@ export async function getIncomeStatement(input: IncomeStatementInput) {
       WHERE g.is_deleted = false AND g.type = 'LABOUR_BILL'
         AND i.type = 'ORNAMENT' AND e.from_account_id = ${SHOP} ${period}`),
 
+    // Purchase wastage = a COST: the wastage % suppliers charge on Purchase →
+    // Ornament rows (supplier → SHOP). Purchase stores the % in wastage_value
+    // with wastage_quantity = 0, so grams are derived per row in
+    // sumPurchaseWastage (see purchaseWastage.ts). GOLD purchase rows never carry
+    // wastage. Raw quantity × touch is used, not pure_quantity, so cash-mode
+    // bills (pure_quantity = 0) still count. Edited/reversed bills are soft-
+    // deleted (is_deleted) and their REVERSAL groups are a different type.
+    db.execute<PurchaseWastageRow>(sql`
+      SELECT e.quantity::text AS quantity, e.purity::text AS purity,
+             e.wastage_mode::text AS wastage_mode, e.wastage_value::text AS wastage_value,
+             e.wastage_quantity::text AS wastage_quantity,
+             COALESCE(e.rate, g.rate_per_gram)::text AS rate
+      FROM entries e JOIN entry_groups g ON e.group_id = g.id JOIN items i ON e.item_id = i.id
+      WHERE g.is_deleted = false AND g.type = 'PURCHASE'
+        AND i.type = 'ORNAMENT' AND e.to_account_id = ${SHOP}
+        AND (COALESCE(e.wastage_quantity, 0) > 0 OR COALESCE(e.wastage_value, 0) > 0) ${period}`),
+
     // Operating expenses (RUPEE lines on EXPENSE groups).
     db.execute<{ total: string | null }>(sql`
       SELECT COALESCE(SUM(e.quantity), 0)::text AS total
@@ -183,8 +202,15 @@ export async function getIncomeStatement(input: IncomeStatementInput) {
   const labourWastageValue = toDecimal(labourWastageRow[0]?.value ?? "0");
   const labourIncome = labourWastageValue;
 
+  // Wastage paid to suppliers on purchases — a cost against the wastage earned.
+  const purchaseWastage = sumPurchaseWastage(Array.from(purchaseWastageRows));
+  const purchaseWastageValue = toDecimal(purchaseWastage.value.toFixed(2));
+
   const operatingExpenses = toDecimal(expenseRow[0]?.total ?? "0");
-  const netProfit = netRevenue.plus(labourIncome).minus(operatingExpenses);
+  const netProfit = netRevenue
+    .plus(labourIncome)
+    .minus(purchaseWastageValue)
+    .minus(operatingExpenses);
 
   return {
     range: { from, to },
@@ -209,6 +235,9 @@ export async function getIncomeStatement(input: IncomeStatementInput) {
     labour_cash_net: labourCashNet.toFixed(2),
     labour_gold_gain_pure: labourGoldGainPure.toFixed(3),
     labour_gold_gain_value: labourGoldGainValue.toFixed(2),
+    // Purchase wastage — a cost, subtracted in net profit
+    purchase_wastage_grams: purchaseWastage.grams.toFixed(3),
+    purchase_wastage_value: purchaseWastageValue.toFixed(2),
     // Expenses → net profit
     operating_expenses: operatingExpenses.toFixed(2),
     net_profit: netProfit.toFixed(2),

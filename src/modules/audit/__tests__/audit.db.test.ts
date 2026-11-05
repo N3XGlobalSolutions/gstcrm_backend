@@ -42,6 +42,24 @@ const RUN = `AUDIT-${Date.now().toString(36)}-${Math.random().toString(36).slice
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The error message a DB call / caller rejects with, or null if it resolves.
+ * Used instead of `expect(p).rejects.toThrow()`: drizzle's db.execute returns a
+ * thenable PgRaw (not a Promise, so `rejects` refuses it), and bun 1.3.x was seen
+ * to hang on `rejects` for DB-backed errors (see labourBill.edit.test.ts).
+ */
+async function errorOf(p: PromiseLike<unknown>): Promise<string | null> {
+  try {
+    await p;
+    return null;
+  } catch (e) {
+    // drizzle wraps driver errors ("Failed query: …"); the Postgres message is on .cause.
+    const cause = (e as { cause?: unknown }).cause;
+    const msg = e instanceof Error ? e.message : String(e);
+    return cause instanceof Error ? `${msg}\n${cause.message}` : msg;
+  }
+}
+
 function caller(auditReason: string | null = null) {
   return appRouter.createCaller({
     user: { id: USER_ID, username: "superadmin", user_group: "admin" },
@@ -126,23 +144,34 @@ describe("tamper protection", () => {
   it("refuses UPDATE / DELETE / TRUNCATE on the log tables", async () => {
     const [row] = await db.select({ id: schema.dataAuditLog.id }).from(schema.dataAuditLog).limit(1);
     expect(row).toBeDefined();
-    await expect(
-      db.execute(orm.sql`update data_audit_log set actor_username = 'mallory' where id = ${row!.id.toString()}::bigint`),
-    ).rejects.toThrow();
-    await expect(db.execute(orm.sql`delete from data_audit_log where id = ${row!.id.toString()}::bigint`)).rejects.toThrow();
-    await expect(db.execute(orm.sql`truncate data_audit_log`)).rejects.toThrow();
-    await expect(db.execute(orm.sql`truncate audit_logs`)).rejects.toThrow();
-    await expect(db.execute(orm.sql`truncate login_history`)).rejects.toThrow();
-    await expect(db.execute(orm.sql`truncate activity_logs`)).rejects.toThrow();
+    const id = row!.id.toString();
+    expect(
+      await errorOf(db.execute(orm.sql`update data_audit_log set actor_username = 'mallory' where id = ${id}::bigint`)),
+    ).toContain("Audit records cannot be changed (data_audit_log)");
+    expect(await errorOf(db.execute(orm.sql`delete from data_audit_log where id = ${id}::bigint`))).toContain(
+      "Audit records cannot be deleted (data_audit_log)",
+    );
+    for (const table of ["data_audit_log", "audit_logs", "login_history", "activity_logs"]) {
+      expect(await errorOf(db.execute(orm.sql`truncate ${orm.sql.identifier(table)}`))).toContain(
+        `Audit records cannot be truncated (${table})`,
+      );
+    }
+    // The row is untouched.
+    const still = await db.execute<{ actor_username: string }>(
+      orm.sql`select actor_username from data_audit_log where id = ${id}::bigint`,
+    );
+    expect(still.length).toBe(1);
+    expect(still[0]!.actor_username).not.toBe("mallory");
   });
 
   it("refuses a retention delete of a row younger than the floor", async () => {
-    await expect(
+    const msg = await errorOf(
       db.transaction(async (tx) => {
         await tx.execute(orm.sql`select set_config('gstcrm.retention', 'on', true)`);
         await tx.execute(orm.sql`delete from data_audit_log where created_at > now() - interval '1 day'`);
       }),
-    ).rejects.toThrow();
+    );
+    expect(msg).toContain("Audit records cannot be deleted");
   });
 });
 
@@ -167,12 +196,13 @@ describe("hash chain", () => {
     expect(security.ok).toBe(true);
 
     // Even the sealer can't rewrite a sealed row.
-    await expect(
+    const msg = await errorOf(
       db.transaction(async (tx) => {
         await tx.execute(orm.sql`select set_config('gstcrm.sealer', 'on', true)`);
         await tx.execute(orm.sql`update data_audit_log set row_hash = repeat('0', 64) where seal_seq = 1`);
       }),
-    ).rejects.toThrow();
+    );
+    expect(msg).toContain("Audit records cannot be changed (data_audit_log)");
   });
 });
 
@@ -250,7 +280,9 @@ describe("routers", () => {
       ip: "192.168.1.5",
       userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     });
-    const lh = await caller().logs.loginHistory({ page: 1, pageSize: 10, userId: USER_ID, event: "login_failed" });
+    // No userId filter: logs.loginHistory takes z.string().uuid() (same as Gold CRM), and
+    // zod 4 refuses the seeded test user's id (version nibble 0 is not an RFC 9562 UUID).
+    const lh = await caller().logs.loginHistory({ page: 1, pageSize: 10, event: "login_failed", ip: "192.168.1.5" });
     expect(lh.total).toBeGreaterThan(0);
     expect(lh.rows[0]!.country).toBe("Local network");
     expect(lh.rows[0]!.device_type).toBe("mobile");
@@ -265,11 +297,13 @@ describe("routers", () => {
     const v = await caller().dataAudit.verify({ chain: "data" });
     expect(v.ok).toBe(true);
 
-    await expect(
-      appRouter
-        .createCaller({ user: { id: USER_ID, username: "fulltest_user", user_group: "admin" } })
-        .logs.audit({ page: 1, pageSize: 10 }),
-    ).rejects.toThrow("Only superadmin");
+    expect(
+      await errorOf(
+        appRouter
+          .createCaller({ user: { id: USER_ID, username: "fulltest_user", user_group: "admin" } })
+          .logs.audit({ page: 1, pageSize: 10 }),
+      ),
+    ).toContain("Only superadmin");
 
     const ev = await caller().logs.logClientEvent({ module: "sales", action: "print", recordRef: "Bill 12" });
     expect(ev.success).toBe(true);
