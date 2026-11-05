@@ -115,11 +115,30 @@ export const CreateLabourBillSchema = z.object({
   rate_per_gram: positiveDecimalSchema,
   remarks: z.string().optional(),
 
-  // Bill Cycle: the permanent ledger this entry belongs to.
-  // REQUIRED — a labour bill must always be posted inside a cycle. Without it the
-  // entry builder would fall back to auto-numbering bill_no (MAX+1), producing a
-  // phantom "bill" that maps to no real cycle. See createLabourBill guard.
-  bill_cycle_id: z.string().uuid({ message: "A bill cycle must be selected before saving a labour bill." }),
+  // Bill Cycle: the permanent ledger this entry belongs to. A labour bill always
+  // lands on a cycle — either an existing one (bill_cycle_id) or, on a NEW bill
+  // only, a cycle created in the bill's own save transaction (new_cycle: true,
+  // next bill_no for the customer — Gold CRM's "New voucher"). Exactly one of the
+  // two on create; update needs bill_cycle_id and refuses new_cycle. Enforced in
+  // the service (createLabourBill / updateLabourBill), not here, so Update can
+  // still .extend() this schema.
+  bill_cycle_id: z.string().uuid({ message: "Selected bill cycle is not valid." }).optional(),
+  new_cycle: z.boolean().optional(),
+
+  // Required Touch of the bill's cycle (0 < touch ≤ 100). Mandatory when the bill
+  // has any Gold Receipt row and the cycle has none stored yet. Given on an
+  // existing cycle and different from its stored value → the cycle is updated in
+  // the same transaction; on new_cycle it is stored on the new cycle. An empty
+  // string counts as "not given".
+  required_touch: z
+    .string()
+    .trim()
+    .refine(v => {
+      if (v === "") return true;
+      const t = Number(v);
+      return !isNaN(t) && t > 0 && t <= 100;
+    }, "Required touch must be greater than 0 and at most 100")
+    .optional(),
 
   // 4-direction stock entries (all between SHOP and GOLDSMITH)
   gold_issue:       z.array(GoldItemSchema).default([]),    // SHOP → Goldsmith
@@ -150,6 +169,7 @@ export const CreateLabourBillSchema = z.object({
   // in the bill's save transaction: true closes the cycle, false reopens it; only
   // written when it differs from the cycle's state. Omitted = cycle left alone.
   // A NEW bill on an already-closed cycle is still refused — reopen it first.
+  // With new_cycle: true closes the just-created cycle in the same transaction.
   close_cycle: z.boolean().optional(),
 });
 

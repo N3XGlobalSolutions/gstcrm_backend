@@ -13,8 +13,8 @@ import {
   getTransactionById,
 } from "@/lib/transactionQueries";
 import { db } from "@/db";
-import { entries as entriesTable, items as itemsTable, entryGroups, labourBillCycles, accounts } from "@/db/schema";
-import { inArray, eq, and, max, desc, sql, not, isNotNull } from "drizzle-orm";
+import { entries as entriesTable, items as itemsTable, entryGroups, labourBillCycles } from "@/db/schema";
+import { inArray, eq, and, desc, sql, not, isNotNull } from "drizzle-orm";
 import type { z } from "zod";
 import {
   CreateLabourBillSchema,
@@ -31,7 +31,9 @@ import {
 } from "./schema";
 import {
   applyCycleCloseFlag,
+  applyCycleRequiredTouch,
   assertCycleTakesBills,
+  insertNextCycle,
   buildCycleSummary,
   loadCycleJobWorks,
   lockCycleForBill,
@@ -76,34 +78,14 @@ export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
   // Validate on every call path (tRPC or direct): Required Touch is mandatory on
   // a new cycle — it is asked once, here.
   const parsed = CreateCycleSchema.parse(input);
-  return db.transaction(async (tx) => {
-    // Lock the account row to serialize bill_no generation for this account
-    await tx.execute(
-      sql`SELECT id FROM ${accounts} WHERE id = ${input.account_id} FOR UPDATE`
-    );
-
-    // Use MAX(bill_no) + 1 per account
-    const [row] = await tx
-      .select({ max: max(labourBillCycles.bill_no) })
-      .from(labourBillCycles)
-      .where(eq(labourBillCycles.account_id, input.account_id));
-
-    const nextBillNo = (row?.max ?? 0) + 1;
-
-    const [cycle] = await tx
-      .insert(labourBillCycles)
-      .values({
-        account_id: input.account_id,
-        bill_no: nextBillNo,
-        main_reason: parsed.main_reason ?? null,
-        required_touch: parsed.required_touch,
-        status: "OPEN",
-      })
-      .returning();
-
-    if (!cycle) throw new AppError("INTERNAL_ERROR", "Failed to create bill cycle");
-    return cycle;
-  });
+  // Same numbering as a Labour Bill's "New cycle" (account row lock → MAX+1).
+  return db.transaction((tx) =>
+    insertNextCycle(tx, {
+      account_id: parsed.account_id,
+      main_reason: parsed.main_reason ?? null,
+      required_touch: parsed.required_touch,
+    }),
+  );
 }
 
 // ─── listCycles ───────────────────────────────────────────────────────────────
@@ -284,6 +266,7 @@ async function assertLabourBillCycle(
       bill_no: labourBillCycles.bill_no,
       account_id: labourBillCycles.account_id,
       status: labourBillCycles.status,
+      required_touch: labourBillCycles.required_touch,
     })
     .from(labourBillCycles)
     .where(eq(labourBillCycles.id, cycleId))
@@ -301,7 +284,38 @@ async function assertLabourBillCycle(
   return cycle;
 }
 
+// ─── Labour Bill cycle / Required Touch rules ─────────────────────────────────
+
+const PICK_CYCLE_MESSAGE = "Pick a cycle or New cycle.";
+const TOUCH_NEEDED_MESSAGE = "Required Touch is needed when receiving gold.";
+
+/** Required Touch from the bill form; "" / whitespace = not given. */
+function givenRequiredTouch(touch: string | undefined): string | undefined {
+  const t = touch?.trim();
+  return t ? t : undefined;
+}
+
+/** A bill with any Gold Receipt row needs a touch: the form's, else the cycle's stored one. */
+function assertTouchForGoldReceipt(
+  goldReceiptRows: number,
+  givenTouch: string | undefined,
+  storedTouch: string | null | undefined,
+) {
+  if (goldReceiptRows > 0 && givenTouch === undefined && !storedTouch) {
+    throw new AppError("VALIDATION_ERROR", TOUCH_NEEDED_MESSAGE, "required_touch");
+  }
+}
+
 // ─── createLabourBill ─────────────────────────────────────────────────────────
+// Cycle (exactly one of):
+//  - bill_cycle_id → existing cycle of this customer; a NEW bill is refused on a
+//    closed one (edits of a bill already on it stay allowed).
+//  - new_cycle     → NEW bill only: the customer's next cycle (bill_no MAX+1,
+//    main_reason null, OPEN) is created inside the bill's save transaction.
+// Required Touch (rule: mandatory when the bill has a Gold Receipt row) is stored
+// on a new cycle, or written to the existing cycle when it differs. close_cycle is
+// applied last. Cycle insert, touch, bill, (edit: reversal of the old version) and
+// close tick all commit or roll back together.
 
 export async function createLabourBill(
   input: z.infer<typeof CreateLabourBillSchema>,
@@ -310,25 +324,36 @@ export async function createLabourBill(
     existingEntryNo?: number;
     /** Edit: the cycle the stored bill is on — it may stay there even if DELIVERED. */
     existingCycleId?: string | null;
+    /** Edit: the stored version, reversed inside the same save transaction. */
+    reverseGroupId?: string;
   }
 ) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   const validated = CreateLabourBillSchema.parse(input);
-  const safeInput = { ...input, ...validated };
 
-  // ── Bill cycle is mandatory ──────────────────────────────────────────────────
-  // A labour bill must always live inside a cycle. If bill_cycle_id is missing the
-  // entry builder falls back to auto-numbering bill_no (MAX+1), producing a phantom
-  // "bill" that maps to no real cycle. Guard here so BOTH the tRPC create path and
-  // the update path (which recreates via this function) are covered.
-  if (!input.bill_cycle_id) {
+  const isEdit = options?.reverseGroupId !== undefined;
+  const newCycle = validated.new_cycle === true;
+  if (newCycle && isEdit) {
     throw new AppError(
       "VALIDATION_ERROR",
-      "A bill cycle must be selected before saving a labour bill.",
+      "New cycle is only for a new bill — pick an existing cycle when editing.",
+      "new_cycle",
     );
   }
-  const cycle = await assertLabourBillCycle(input.bill_cycle_id, input.account_id, options?.existingCycleId);
-  const cycleBillNo: number = cycle.bill_no;
+  // ── Exactly one of bill_cycle_id / new_cycle ─────────────────────────────────
+  // A labour bill must always live inside a real cycle (without one the entry
+  // builder would auto-number a phantom bill_no that maps to no cycle).
+  if (newCycle === !!validated.bill_cycle_id) {
+    throw new AppError("VALIDATION_ERROR", PICK_CYCLE_MESSAGE, "bill_cycle_id");
+  }
+
+  const touch = givenRequiredTouch(validated.required_touch);
+  // Pre-check (outside the transaction) so a refusal costs nothing; the locked
+  // re-check below is what guards against a concurrent change.
+  const precheckedCycle = validated.bill_cycle_id
+    ? await assertLabourBillCycle(validated.bill_cycle_id, input.account_id, options?.existingCycleId)
+    : null;
+  assertTouchForGoldReceipt(validated.gold_receipt.length, touch, precheckedCycle?.required_touch);
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
@@ -531,30 +556,59 @@ export async function createLabourBill(
     throw new AppError("VALIDATION_ERROR", "Labour bill must have at least one entry");
   }
 
-  // One transaction: the bill and the "Close cycle" tick commit or roll back
-  // together. The cycle row is locked and re-checked first; its status as read
-  // here (BEFORE the tick) is what decides whether the bill may be saved.
-  const billCycleId = input.bill_cycle_id;
+  // One transaction: (new cycle | locked existing cycle + touch), the edited
+  // bill's reversal, the bill and the "Close cycle" tick commit or roll back
+  // together. An existing cycle is locked and re-checked first; its status as
+  // read here (BEFORE the tick) is what decides whether the bill may be saved.
   return db.transaction(async (tx) => {
-    const lockedCycle = await lockCycleForBill(tx, billCycleId, options?.existingCycleId);
+    let cycle: { id: string; bill_no: number; status: string; required_touch: string | null };
+    if (newCycle) {
+      cycle = await insertNextCycle(tx, {
+        account_id: input.account_id,
+        main_reason: null,
+        required_touch: touch === undefined ? null : toDecimal(touch).toDecimalPlaces(2).toFixed(2),
+      });
+    } else {
+      cycle = await lockCycleForBill(tx, validated.bill_cycle_id!, options?.existingCycleId);
+      assertTouchForGoldReceipt(validated.gold_receipt.length, touch, cycle.required_touch);
+      await applyCycleRequiredTouch(tx, cycle, touch);
+    }
+
+    if (options?.reverseGroupId) {
+      await reverseEntryGroup(options.reverseGroupId, tx);
+    }
 
     const { group, entries: created } = await createEntryGroup({
       type: "LABOUR_BILL",
       accountId: input.account_id,
       date: input.date,
-      billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
+      billNo: cycle.bill_no, // always the real cycle's bill_no
       entryNo: options?.existingEntryNo,
       ratePerGram: input.rate_per_gram,
       remarks: input.remarks,
-      billCycleId,
+      billCycleId: cycle.id,
       tdsAmount: input.tds_amount,
       tcsAmount: input.tcs_amount,
       entries,
     }, tx);
 
-    await applyCycleCloseFlag(tx, lockedCycle, input.close_cycle);
+    await applyCycleCloseFlag(tx, cycle, validated.close_cycle);
 
-    return { group, entries: created };
+    // The cycle as the bill left it (touch / close tick applied) — the UI
+    // toasts "Saved on Cycle N" from this.
+    const [saved] = await tx
+      .select({
+        id: labourBillCycles.id,
+        bill_no: labourBillCycles.bill_no,
+        required_touch: labourBillCycles.required_touch,
+        status: labourBillCycles.status,
+      })
+      .from(labourBillCycles)
+      .where(eq(labourBillCycles.id, cycle.id))
+      .limit(1);
+    if (!saved) throw new AppError("INTERNAL_ERROR", "Bill cycle vanished during save");
+
+    return { group, entries: created, cycle: saved };
   });
 }
 
@@ -563,6 +617,23 @@ export async function createLabourBill(
 export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSchema>) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   UpdateLabourBillSchema.parse(input);
+
+  // An edited bill keeps / chooses an EXISTING cycle — "New cycle" is for new
+  // bills only. Refused before anything is touched.
+  if (input.new_cycle === true) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "New cycle is only for a new bill — pick an existing cycle when editing.",
+      "new_cycle",
+    );
+  }
+  if (!input.bill_cycle_id) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "A bill cycle must be selected before saving a labour bill.",
+      "bill_cycle_id",
+    );
+  }
 
   const [originalGroup] = await db
     .select({
@@ -578,16 +649,15 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
     throw new AppError("NOT_FOUND", "Labour bill not found");
   }
 
-  // Check the cycle BEFORE reversing — a refusal after the reversal would leave
-  // the bill reversed with nothing in its place.
-  await assertLabourBillCycle(input.bill_cycle_id, input.account_id, originalGroup.bill_cycle_id);
-
-  await reverseEntryGroup(input.id);
-  const { id: _removed, ...createInput } = input;
+  // The old version is reversed INSIDE createLabourBill's save transaction
+  // (reverseGroupId), so any refusal — closed cycle, missing Required Touch, a
+  // concurrent edit — leaves the stored bill untouched.
+  const { id: _removed, new_cycle: _newCycle, ...createInput } = input;
   return createLabourBill(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
     existingCycleId: originalGroup.bill_cycle_id,
+    reverseGroupId: input.id,
   });
 }
 

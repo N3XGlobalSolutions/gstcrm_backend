@@ -156,13 +156,73 @@ export function assertCycleTakesBills(
  */
 export async function lockCycleForBill(tx: Tx, cycleId: string, keepingCycleId: string | null | undefined) {
   const [cycle] = await tx
-    .select({ id: labourBillCycles.id, bill_no: labourBillCycles.bill_no, status: labourBillCycles.status })
+    .select({
+      id: labourBillCycles.id,
+      bill_no: labourBillCycles.bill_no,
+      status: labourBillCycles.status,
+      required_touch: labourBillCycles.required_touch,
+    })
     .from(labourBillCycles)
     .where(eq(labourBillCycles.id, cycleId))
     .for("update");
   if (!cycle) throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.", "bill_cycle_id");
   assertCycleTakesBills(cycle, keepingCycleId, "labour bill", "bill_cycle_id");
   return cycle;
+}
+
+/**
+ * Inserts the customer's next cycle (bill_no = MAX+1 for the account), status
+ * OPEN, inside the caller's transaction. Race-safe: the customer's accounts row
+ * is locked FOR UPDATE first, so every cycle insert for one account (manual
+ * createCycle and a Labour Bill's "New cycle") runs one at a time and each sees
+ * the previous one's number. The (account_id, bill_no) unique constraint is the
+ * backstop. The lock is held until the caller's transaction ends.
+ */
+export async function insertNextCycle(
+  tx: Tx,
+  input: { account_id: string; main_reason?: string | null; required_touch?: string | null },
+) {
+  const locked = await tx.execute<{ id: string }>(
+    sql`SELECT id FROM ${accounts} WHERE id = ${input.account_id} FOR UPDATE`,
+  );
+  if (!locked[0]) throw new AppError("NOT_FOUND", "Account not found.", "account_id");
+
+  const [row] = await tx
+    .select({ max: sql<number | null>`max(${labourBillCycles.bill_no})` })
+    .from(labourBillCycles)
+    .where(eq(labourBillCycles.account_id, input.account_id));
+  const nextBillNo = Number(row?.max ?? 0) + 1;
+
+  const [cycle] = await tx
+    .insert(labourBillCycles)
+    .values({
+      account_id: input.account_id,
+      bill_no: nextBillNo,
+      main_reason: input.main_reason ?? null,
+      required_touch: input.required_touch ?? null,
+      status: "OPEN",
+    })
+    .returning();
+  if (!cycle) throw new AppError("INTERNAL_ERROR", "Failed to create bill cycle");
+  return cycle;
+}
+
+/**
+ * Labour Bill form's Required Touch: written to the bill's (existing) cycle when
+ * given and different from the stored value (compared at the column's 2 dp).
+ */
+export async function applyCycleRequiredTouch(
+  tx: Tx,
+  cycle: { id: string; required_touch: string | null },
+  touch: string | undefined,
+) {
+  if (touch === undefined) return;
+  const next = toDecimal(touch).toDecimalPlaces(2);
+  if (cycle.required_touch !== null && toDecimal(cycle.required_touch).eq(next)) return;
+  await tx
+    .update(labourBillCycles)
+    .set({ required_touch: next.toFixed(2), updated_at: new Date() })
+    .where(eq(labourBillCycles.id, cycle.id));
 }
 
 /**
