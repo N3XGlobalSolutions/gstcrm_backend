@@ -41,6 +41,9 @@ export const entryGroups = pgTable(
     bill_cycle_id: uuid("bill_cycle_id").references(() => labourBillCycles.id),
     // For JOB_WORK entries: links to the permanent job-work bill cycle this entry belongs to
     job_work_cycle_id: uuid("job_work_cycle_id").references(() => jobWorkCycles.id),
+    // For JOB_WORK entries (0026, optional): the CUSTOMER cycle (labour_bill_cycles)
+    // this job work is done for — the employee works on that customer's order.
+    order_cycle_id: uuid("order_cycle_id").references(() => labourBillCycles.id),
     date: date("date").notNull(),
     type: entryGroupTypeEnum("type").notNull(),
     account_id: uuid("account_id")
@@ -67,5 +70,6 @@ export const entryGroups = pgTable(
     index("entry_groups_type_created_at_idx").on(t.type, t.created_at),
     index("entry_groups_is_deleted_idx").on(t.is_deleted),
     index("entry_groups_created_at_idx").on(t.created_at),
+    index("entry_groups_order_cycle_id_idx").on(t.order_cycle_id),
   ],
 );

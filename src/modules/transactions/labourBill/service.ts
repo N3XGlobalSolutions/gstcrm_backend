@@ -19,16 +19,23 @@ import type { z } from "zod";
 import {
   CreateLabourBillSchema,
   UpdateLabourBillSchema,
+  CreateCycleSchema,
   type ListTxSchema,
   type GetByIdSchema,
   type DeleteTxSchema,
-  type CreateCycleSchema,
   type ListCyclesSchema,
   type GetCycleDetailSchema,
   type ConvertGoldToCashSchema,
   type ConvertCashToGoldSchema,
   type ReceiveCashSchema,
 } from "./schema";
+import {
+  applyCycleCloseFlag,
+  assertCycleTakesBills,
+  buildCycleSummary,
+  loadCycleJobWorks,
+  lockCycleForBill,
+} from "./cycleLink";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
 // wastage_gm = (weight × wastage_percent/100) / (touch/100)
@@ -66,6 +73,9 @@ function calcOrnamentEntry(item: {
 // The bill_no is auto-incremented per-account (1, 2, 3…).
 
 export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
+  // Validate on every call path (tRPC or direct): Required Touch is mandatory on
+  // a new cycle — it is asked once, here.
+  const parsed = CreateCycleSchema.parse(input);
   return db.transaction(async (tx) => {
     // Lock the account row to serialize bill_no generation for this account
     await tx.execute(
@@ -85,7 +95,9 @@ export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
       .values({
         account_id: input.account_id,
         bill_no: nextBillNo,
-        main_reason: input.main_reason ?? null,
+        main_reason: parsed.main_reason ?? null,
+        required_touch: parsed.required_touch,
+        status: "OPEN",
       })
       .returning();
 
@@ -134,13 +146,12 @@ export async function getCycleDetail(input: z.infer<typeof GetCycleDetailSchema>
     )
     .orderBy(entryGroups.created_at);
 
-  if (groups.length === 0) {
-    return { cycle, groups: [] };
-  }
+  // 2b. Job Works linked to this customer cycle (employee side) — 0026.
+  const jobWorks = await loadCycleJobWorks(input.cycle_id);
 
   // 3. Fetch all entries for those groups
   const groupIds = groups.map((g) => g.group.id);
-  const txEntries = await db
+  const txEntries = groupIds.length === 0 ? [] : await db
     .select({
       entry: entriesTable,
       item_name: itemsTable.name,
@@ -163,7 +174,16 @@ export async function getCycleDetail(input: z.infer<typeof GetCycleDetailSchema>
     entries: entryMap.get(g.group.id) ?? [],
   }));
 
-  return { cycle, groups: enrichedGroups };
+  // Customer side (this cycle's labour bills) and employee side (linked job
+  // works) are summarised separately — never mixed into one number.
+  // groups holds only LABOUR_BILL groups in practice (bill_cycle_id is set on
+  // labour bills only), but filter to be safe.
+  const summary = buildCycleSummary(
+    enrichedGroups.filter((g) => g.group.type === "LABOUR_BILL"),
+    jobWorks,
+  );
+
+  return { cycle, groups: enrichedGroups, job_works: jobWorks, summary };
 }
 
 // ─── listLabourBills ──────────────────────────────────────────────────────────
@@ -248,11 +268,49 @@ export async function getLabourBillById(input: z.infer<typeof GetByIdSchema>) {
   };
 }
 
+// ─── Cycle check for a labour bill save ───────────────────────────────────────
+// The cycle must exist and belong to the bill's customer. A DELIVERED cycle takes
+// no NEW bill; editing a bill that is already on it stays allowed
+// (existingCycleId = the cycle the stored bill is on).
+
+async function assertLabourBillCycle(
+  cycleId: string,
+  accountId: string,
+  existingCycleId?: string | null,
+) {
+  const [cycle] = await db
+    .select({
+      id: labourBillCycles.id,
+      bill_no: labourBillCycles.bill_no,
+      account_id: labourBillCycles.account_id,
+      status: labourBillCycles.status,
+    })
+    .from(labourBillCycles)
+    .where(eq(labourBillCycles.id, cycleId))
+    .limit(1);
+  if (!cycle) {
+    throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.");
+  }
+  if (cycle.account_id !== accountId) {
+    throw new AppError(
+      "BUSINESS_RULE_VIOLATION",
+      "Selected bill cycle belongs to a different goldsmith.",
+    );
+  }
+  assertCycleTakesBills(cycle, existingCycleId, "labour bill", "bill_cycle_id");
+  return cycle;
+}
+
 // ─── createLabourBill ─────────────────────────────────────────────────────────
 
 export async function createLabourBill(
   input: z.infer<typeof CreateLabourBillSchema>,
-  options?: { existingBillNo?: number; existingEntryNo?: number }
+  options?: {
+    existingBillNo?: number;
+    existingEntryNo?: number;
+    /** Edit: the cycle the stored bill is on — it may stay there even if DELIVERED. */
+    existingCycleId?: string | null;
+  }
 ) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   const validated = CreateLabourBillSchema.parse(input);
@@ -269,20 +327,7 @@ export async function createLabourBill(
       "A bill cycle must be selected before saving a labour bill.",
     );
   }
-  const [cycle] = await db
-    .select({ bill_no: labourBillCycles.bill_no, account_id: labourBillCycles.account_id })
-    .from(labourBillCycles)
-    .where(eq(labourBillCycles.id, input.bill_cycle_id))
-    .limit(1);
-  if (!cycle) {
-    throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.");
-  }
-  if (cycle.account_id !== input.account_id) {
-    throw new AppError(
-      "BUSINESS_RULE_VIOLATION",
-      "Selected bill cycle belongs to a different goldsmith.",
-    );
-  }
+  const cycle = await assertLabourBillCycle(input.bill_cycle_id, input.account_id, options?.existingCycleId);
   const cycleBillNo: number = cycle.bill_no;
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
@@ -486,21 +531,31 @@ export async function createLabourBill(
     throw new AppError("VALIDATION_ERROR", "Labour bill must have at least one entry");
   }
 
-  const { group, entries: created } = await createEntryGroup({
-    type: "LABOUR_BILL",
-    accountId: input.account_id,
-    date: input.date,
-    billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
-    entryNo: options?.existingEntryNo,
-    ratePerGram: input.rate_per_gram,
-    remarks: input.remarks,
-    billCycleId: input.bill_cycle_id,
-    tdsAmount: input.tds_amount,
-    tcsAmount: input.tcs_amount,
-    entries,
-  });
+  // One transaction: the bill and the "Close cycle" tick commit or roll back
+  // together. The cycle row is locked and re-checked first; its status as read
+  // here (BEFORE the tick) is what decides whether the bill may be saved.
+  const billCycleId = input.bill_cycle_id;
+  return db.transaction(async (tx) => {
+    const lockedCycle = await lockCycleForBill(tx, billCycleId, options?.existingCycleId);
 
-  return { group, entries: created };
+    const { group, entries: created } = await createEntryGroup({
+      type: "LABOUR_BILL",
+      accountId: input.account_id,
+      date: input.date,
+      billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
+      entryNo: options?.existingEntryNo,
+      ratePerGram: input.rate_per_gram,
+      remarks: input.remarks,
+      billCycleId,
+      tdsAmount: input.tds_amount,
+      tcsAmount: input.tcs_amount,
+      entries,
+    }, tx);
+
+    await applyCycleCloseFlag(tx, lockedCycle, input.close_cycle);
+
+    return { group, entries: created };
+  });
 }
 
 // ─── updateLabourBill ─────────────────────────────────────────────────────────
@@ -513,6 +568,7 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
     .select({
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
+      bill_cycle_id: entryGroups.bill_cycle_id,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
@@ -522,11 +578,16 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
     throw new AppError("NOT_FOUND", "Labour bill not found");
   }
 
+  // Check the cycle BEFORE reversing — a refusal after the reversal would leave
+  // the bill reversed with nothing in its place.
+  await assertLabourBillCycle(input.bill_cycle_id, input.account_id, originalGroup.bill_cycle_id);
+
   await reverseEntryGroup(input.id);
   const { id: _removed, ...createInput } = input;
   return createLabourBill(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
+    existingCycleId: originalGroup.bill_cycle_id,
   });
 }
 

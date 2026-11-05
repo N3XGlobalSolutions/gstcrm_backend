@@ -29,6 +29,29 @@ import {
   type ConvertCashToGoldSchema,
   type ReceiveCashSchema,
 } from "./schema";
+import { getCycleRefs, resolveOrderCycleForJobWork, type CycleRef } from "../labourBill/cycleLink";
+
+// The customer cycle a job work is linked to, as returned on getById / list rows.
+function orderCycleView(c: CycleRef | undefined) {
+  if (!c) return null;
+  return {
+    id: c.id,
+    bill_no: c.bill_no,
+    account_id: c.account_id,
+    customer_name: c.customer_name,
+    required_touch: c.required_touch,
+    status: c.status,
+  };
+}
+
+// order_cycle + flat label fields (history column labels delivered cycles too).
+function orderCycleFields(c: CycleRef | undefined) {
+  return {
+    order_cycle: orderCycleView(c),
+    order_cycle_bill_no: c ? c.bill_no : null,
+    order_cycle_customer_name: c ? c.customer_name : null,
+  };
+}
 
 // ─── Wastage formula for Job Work ornament items ──────────────────────────────
 // wastage_gm = (weight × wastage_percent/100) / (touch/100)
@@ -171,18 +194,19 @@ export async function getCycleDetail(input: z.infer<typeof GetCycleDetailSchema>
 export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
   const result = await listTransactions("JOB_WORK", input);
 
-  if (result.data.length === 0) return result;
-
-  // Batch-fetch all entries for the returned groups (same pattern as listPurchases)
+  // No early return on an empty page: returning `result` as-is made the output
+  // type a union that TypeScript reduced to the plain row, hiding entries /
+  // openingPure / order_cycle* from the client types. Empty pages skip the queries.
   const groupIds = result.data.map((d) => d.group.id);
-  const txEntries = await db
+  const txEntries = groupIds.length === 0 ? [] : await db
     .select({
       entry: entriesTable,
       item_name: itemsTable.name,
       item_type: itemsTable.type,
     })
     .from(entriesTable)
-    .leftJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
+    // entries.item_id is a NOT NULL FK, so inner join = same rows, non-null item_name / item_type.
+    .innerJoin(itemsTable, eq(entriesTable.item_id, itemsTable.id))
     .where(inArray(entriesTable.group_id, groupIds));
 
   // Batch-fetch opening balances in a single query
@@ -192,7 +216,10 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
     createdAt: new Date(d.group.created_at),
     excludeGroupId: d.group.id,
   }));
-  const batchBalances = await getBatchAggregateBalances(tuples);
+  const [batchBalances, orderCycles] = await Promise.all([
+    tuples.length === 0 ? Promise.resolve({} as Awaited<ReturnType<typeof getBatchAggregateBalances>>) : getBatchAggregateBalances(tuples),
+    getCycleRefs(result.data.map((d) => d.group.order_cycle_id)),
+  ]);
 
   // Attach entries + compute opening balance per group
   const finalData = result.data.map((d) => {
@@ -207,6 +234,8 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
       entries: groupEntries,
       openingPure: opening.totalPure.toFixed(4),
       openingCash: opening.totalCash.toFixed(2),
+      // Customer cycle this job work is linked to (group.order_cycle_id), or null.
+      ...orderCycleFields(d.group.order_cycle_id ? orderCycles.get(d.group.order_cycle_id) : undefined),
     };
   });
 
@@ -240,11 +269,15 @@ export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
     .orderBy(desc(entryGroups.created_at))
     .limit(1);
 
+  const orderCycles = await getCycleRefs([tx.group.order_cycle_id]);
+
   return {
     ...tx,
     openingPure: opening.balancePure.toString(),
     openingCash: opening.totalCash.toString(),
-    lastRate: lastGroup?.rate_per_gram || "0"
+    lastRate: lastGroup?.rate_per_gram || "0",
+    // Customer cycle this job work is linked to (group.order_cycle_id), or null.
+    ...orderCycleFields(tx.group.order_cycle_id ? orderCycles.get(tx.group.order_cycle_id) : undefined),
   };
 }
 
@@ -252,7 +285,13 @@ export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
 
 export async function createJobWork(
   input: z.infer<typeof CreateJobWorkSchema>,
-  options?: { existingBillNo?: number; existingEntryNo?: number; createdAtFromGroupId?: string }
+  options?: {
+    existingBillNo?: number;
+    existingEntryNo?: number;
+    createdAtFromGroupId?: string;
+    /** Edit: the customer cycle the stored job work is linked to — may stay even if DELIVERED. */
+    existingOrderCycleId?: string | null;
+  }
 ) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
   const validated = CreateJobWorkSchema.parse(input);
@@ -284,6 +323,10 @@ export async function createJobWork(
     );
   }
   const cycleBillNo: number = cycle.bill_no;
+
+  // ── Customer cycle link (optional) ─────────────────────────────────────────
+  // Must exist; must be OPEN unless it is the cycle the edited job work already has.
+  const orderCycleId = await resolveOrderCycleForJobWork(input.order_cycle_id, options?.existingOrderCycleId);
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
@@ -495,6 +538,7 @@ export async function createJobWork(
     ratePerGram: input.rate_per_gram,
     remarks: input.remarks,
     jobWorkCycleId: input.bill_cycle_id,
+    orderCycleId,
     tdsAmount: input.tds_amount,
     tcsAmount: input.tcs_amount,
     createdAtFromGroupId: options?.createdAtFromGroupId,
@@ -515,6 +559,7 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
       created_at: entryGroups.created_at,
+      order_cycle_id: entryGroups.order_cycle_id,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
@@ -524,15 +569,24 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
     throw new AppError("NOT_FOUND", "Job work not found");
   }
 
+  // Customer cycle link: omitted (undefined) = keep the stored link, so a client
+  // that doesn't send the field never silently drops it; null = clear it.
+  const orderCycleId =
+    input.order_cycle_id === undefined ? originalGroup.order_cycle_id : input.order_cycle_id;
+  // Check it BEFORE reversing — a refusal after the reversal would leave the
+  // job work reversed with nothing in its place.
+  await resolveOrderCycleForJobWork(orderCycleId, originalGroup.order_cycle_id);
+
   // Any bill (not just the latest) can be edited. The reversal and the new
   // version both keep the original timestamp, so the bill stays in place and
   // every later bill's opening balance picks up the change automatically.
   await reverseEntryGroup(input.id, undefined, { backdate: true });
   const { id: _removed, ...createInput } = input;
-  return createJobWork(createInput, {
+  return createJobWork({ ...createInput, order_cycle_id: orderCycleId }, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
     createdAtFromGroupId: input.id,
+    existingOrderCycleId: originalGroup.order_cycle_id,
   });
 }
 

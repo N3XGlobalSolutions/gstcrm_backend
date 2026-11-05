@@ -12,6 +12,8 @@ import {
   ConvertGoldToCashSchema,
   ConvertCashToGoldSchema,
   ReceiveCashSchema,
+  ListOpenCyclesSchema,
+  IssuableGoldSchema,
 } from "./schema";
 import {
   listJobWork,
@@ -26,6 +28,7 @@ import {
   convertCashToGold,
   receiveCash,
 } from "./service";
+import { listOpenCycles, getIssuableGold } from "../labourBill/cycleLink";
 
 export const jobWorkRouter = router({
   list:     guardedProcedure("jobWork", "jobWork", "view").input(ListTxSchema).query(async ({ input }) => listJobWork(input)),
@@ -42,6 +45,11 @@ export const jobWorkRouter = router({
   createCycle:    guardedProcedure("jobWork", "jobWork", "edit").input(CreateCycleSchema).mutation(async ({ input }) => createCycle(input)),
   listCycles:     guardedProcedure("jobWork", "jobWork", "view").input(ListCyclesSchema).query(async ({ input }) => listCycles(input)),
   getCycleDetail: guardedProcedure("jobWork", "jobWork", "view").input(GetCycleDetailSchema).query(async ({ input }) => getCycleDetail(input)),
+
+  // Customer cycle link: pick any customer's OPEN cycle (labour_bill_cycles) and
+  // auto-fill Gold Issue with the gold received on it that is not yet issued.
+  listOpenCycles: guardedProcedure("jobWork", "jobWork", "view").input(ListOpenCyclesSchema).query(async ({ input }) => listOpenCycles(input)),
+  issuableGold:   guardedProcedure("jobWork", "jobWork", "view").input(IssuableGoldSchema).query(async ({ input }) => getIssuableGold(input)),
 
   // Gold ↔ Cash conversion + standalone Receive Cash (ported from Labour Bill)
   convertGoldToCash: guardedProcedure("jobWork", "jobWork", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),

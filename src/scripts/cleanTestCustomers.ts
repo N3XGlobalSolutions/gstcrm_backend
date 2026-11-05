@@ -64,6 +64,15 @@ async function cleanTestRecords() {
         WHERE account_id IN (${sql.raw(idListStr)})
       `);
 
+      // Other accounts' job works may be linked to these customers' cycles
+      // (entry_groups.order_cycle_id, 0026) — drop the link so the delete can go.
+      await db.execute(sql`
+        UPDATE entry_groups SET order_cycle_id = NULL
+        WHERE order_cycle_id IN (
+          SELECT id FROM labour_bill_cycles WHERE account_id IN (${sql.raw(idListStr)})
+        )
+      `);
+
       // Delete from labour_bill_cycles
       await db.execute(sql`
         DELETE FROM labour_bill_cycles 

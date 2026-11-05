@@ -92,6 +92,12 @@ export const CreateJobWorkSchema = z.object({
   // phantom "bill" that maps to no real cycle. See createJobWork guard.
   bill_cycle_id: z.string().uuid({ message: "A bill cycle must be selected before saving a job work." }),
 
+  // Customer cycle (labour_bill_cycles) this job work is done for — OPTIONAL.
+  // Any customer's OPEN cycle (an employee may work on any customer's order).
+  // null = not linked (an edit may clear it); omitted on update = keep the
+  // stored link. Stored on entry_groups.order_cycle_id.
+  order_cycle_id: z.string().uuid().nullable().optional(),
+
   // 4-direction stock entries (all between SHOP and the account)
   gold_issue:       z.array(GoldItemSchema).default([]),    // SHOP → Account
   gold_receipt:     z.array(GoldItemSchema).default([]),    // Account → SHOP
@@ -142,6 +148,21 @@ export const ReceiveCashSchema = z.object({
   amount: positiveDecimalSchema,    // cash amount received — must be > 0
   date: dateSchema,
   details: z.string().optional(),   // bank name/A/C or "Cash"
+});
+
+// ─── Customer cycle link (Issue Job Works side) ───────────────────────────────
+
+// Cycle picker: OPEN customer cycles of all customers; include_cycle_id (the
+// job work being edited is linked to it) is listed even when DELIVERED.
+export const ListOpenCyclesSchema = z.object({
+  include_cycle_id: z.string().uuid().optional().nullable(),
+});
+
+// Gold Issue auto-fill: gold received on the cycle less what its job works
+// already issued; exclude_group_id = the job work being edited.
+export const IssuableGoldSchema = z.object({
+  cycle_id: z.string().uuid(),
+  exclude_group_id: z.string().uuid().optional().nullable(),
 });
 
 export type CreateJobWorkInput = z.infer<typeof CreateJobWorkSchema>;
