@@ -192,8 +192,8 @@ describe("requiresAuditReason", () => {
     ["stock.deleteByLot", true],
     ["stock.addOpeningStock", false],
     // Melting register (GST CRM only): a saved stock voucher
-    ["melting.update", true],
-    ["melting.delete", true],
+    ["melting.update", false],
+    ["melting.delete", false],
     ["melting.create", false],
     ["melting.metals.update", false],
     ["melting.metals.delete", false],

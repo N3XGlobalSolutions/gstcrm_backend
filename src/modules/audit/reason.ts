@@ -7,8 +7,7 @@
 // Pure — no database / env imports.
 //
 // Ported from Gold CRM. GST CRM has no investment / order voucher / wages
-// routers, so those paths are gone; the melting register (GST CRM only) is a
-// saved stock voucher, so melting.update / melting.delete need a reason too.
+// routers, so those paths are gone. Melting (GST CRM only) does NOT need a reason — owner decision 2026-11-05.
 // The frontend mirrors this rule (gstcrm_frontend/src/lib/auditReason.ts).
 
 export const AUDIT_REASON_HEADER = "x-audit-reason";
@@ -16,9 +15,9 @@ export const AUDIT_REASON_MIN = 3;
 export const AUDIT_REASON_MAX = 500;
 export const AUDIT_REASON_REQUIRED_MESSAGE = "Please give a reason for this change.";
 
-/** transactions.<any>.update* / delete* / undo*, and the same under bank, stock, melting. */
+/** transactions.<any>.update* / delete* / undo*, and the same under bank, stock. Melting is deliberately NOT included (owner decision 2026-11-05). */
 export const AUDIT_REASON_PATH_RE =
-  /^(transactions\.[a-zA-Z]+|bank|stock|melting)\.(update\w*|delete\w*|undo\w*)$/;
+  /^(transactions\.[a-zA-Z]+|bank|stock)\.(update\w*|delete\w*|undo\w*)$/;
 
 /**
  * Payment actions on an already-saved bill (owner's rule). Exact paths only.

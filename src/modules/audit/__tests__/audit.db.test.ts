@@ -189,8 +189,16 @@ describe("routers", () => {
       caller(null).transactions.expense.delete({ id: "33333333-3333-4333-8333-333333333333" } as never),
     ).rejects.toThrow("Please give a reason for this change.");
     await expect(
-      caller(null).melting.delete({ id: "33333333-3333-4333-8333-333333333333" } as never),
+      caller(null).transactions.labourBill.delete({ id: "33333333-3333-4333-8333-333333333333" } as never),
     ).rejects.toThrow("Please give a reason for this change.");
+    // Melting never asks for a reason (owner decision 2026-11-05).
+    let meltingMsg = "";
+    try {
+      await caller(null).melting.delete({ id: "33333333-3333-4333-8333-333333333333" } as never);
+    } catch (e) {
+      meltingMsg = (e as Error).message;
+    }
+    expect(meltingMsg).not.toBe("Please give a reason for this change.");
     // With a reason the rule passes (and the missing bill is reported instead).
     let message = "";
     try {
