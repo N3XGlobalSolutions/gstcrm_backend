@@ -33,7 +33,7 @@ async function makeGoldsmith(label: string) {
       customer_type: "GOLD_SMITH",
     })
     .returning();
-  const cycle = await createCycle({ account_id: acc!.id, main_reason: "edit test", required_touch: "91.6" });
+  const cycle = await createCycle({ account_id: acc!.id, main_reason: "edit test" });
   return { accountId: acc!.id, cycleId: cycle.id };
 }
 

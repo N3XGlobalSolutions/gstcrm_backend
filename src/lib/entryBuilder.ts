@@ -64,7 +64,7 @@ export interface CreateEntryGroupInput {
   skipBillNo?: boolean;
   billCycleId?: string;  // FK to labour_bill_cycles.id
   jobWorkCycleId?: string;  // FK to job_work_cycles.id
-  orderCycleId?: string | null;  // JOB_WORK only: FK to labour_bill_cycles.id (the customer cycle)
+  orderCycleId?: string | null;  // JOB_WORK only: FK to labour_bill_cycles.id. Unused since 2026-11-06 (Customer Cycle removed) — only an edit carries the old value over
   ratePerGram?: string;
   remarks?: string;
   reversalOf?: string;

@@ -29,30 +29,7 @@ import {
   type ConvertCashToGoldSchema,
   type ReceiveCashSchema,
 } from "./schema";
-import { getCycleRefs, resolveOrderCycleForJobWork, type CycleRef } from "../labourBill/cycleLink";
 import { assertTouchForReceipts, givenRequiredTouch } from "./touch";
-
-// The customer cycle a job work is linked to, as returned on getById / list rows.
-function orderCycleView(c: CycleRef | undefined) {
-  if (!c) return null;
-  return {
-    id: c.id,
-    bill_no: c.bill_no,
-    account_id: c.account_id,
-    customer_name: c.customer_name,
-    required_touch: c.required_touch,
-    status: c.status,
-  };
-}
-
-// order_cycle + flat label fields (history column labels delivered cycles too).
-function orderCycleFields(c: CycleRef | undefined) {
-  return {
-    order_cycle: orderCycleView(c),
-    order_cycle_bill_no: c ? c.bill_no : null,
-    order_cycle_customer_name: c ? c.customer_name : null,
-  };
-}
 
 /** Required Touch % as stored on job_work_cycles (numeric(6,2)). */
 function touchColumnValue(touch: string): string {
@@ -207,7 +184,7 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
 
   // No early return on an empty page: returning `result` as-is made the output
   // type a union that TypeScript reduced to the plain row, hiding entries /
-  // openingPure / order_cycle* from the client types. Empty pages skip the queries.
+  // openingPure from the client types. Empty pages skip the queries.
   const groupIds = result.data.map((d) => d.group.id);
   const txEntries = groupIds.length === 0 ? [] : await db
     .select({
@@ -227,10 +204,9 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
     createdAt: new Date(d.group.created_at),
     excludeGroupId: d.group.id,
   }));
-  const [batchBalances, orderCycles] = await Promise.all([
-    tuples.length === 0 ? Promise.resolve({} as Awaited<ReturnType<typeof getBatchAggregateBalances>>) : getBatchAggregateBalances(tuples),
-    getCycleRefs(result.data.map((d) => d.group.order_cycle_id)),
-  ]);
+  const batchBalances = tuples.length === 0
+    ? ({} as Awaited<ReturnType<typeof getBatchAggregateBalances>>)
+    : await getBatchAggregateBalances(tuples);
 
   // Attach entries + compute opening balance per group
   const finalData = result.data.map((d) => {
@@ -245,8 +221,6 @@ export async function listJobWork(input: z.infer<typeof ListTxSchema>) {
       entries: groupEntries,
       openingPure: opening.totalPure.toFixed(4),
       openingCash: opening.totalCash.toFixed(2),
-      // Customer cycle this job work is linked to (group.order_cycle_id), or null.
-      ...orderCycleFields(d.group.order_cycle_id ? orderCycles.get(d.group.order_cycle_id) : undefined),
     };
   });
 
@@ -280,15 +254,11 @@ export async function getJobWorkById(input: z.infer<typeof GetByIdSchema>) {
     .orderBy(desc(entryGroups.created_at))
     .limit(1);
 
-  const orderCycles = await getCycleRefs([tx.group.order_cycle_id]);
-
   return {
     ...tx,
     openingPure: opening.balancePure.toString(),
     openingCash: opening.totalCash.toString(),
     lastRate: lastGroup?.rate_per_gram || "0",
-    // Customer cycle this job work is linked to (group.order_cycle_id), or null.
-    ...orderCycleFields(tx.group.order_cycle_id ? orderCycles.get(tx.group.order_cycle_id) : undefined),
   };
 }
 
@@ -300,8 +270,10 @@ export async function createJobWork(
     existingBillNo?: number;
     existingEntryNo?: number;
     createdAtFromGroupId?: string;
-    /** Edit: the customer cycle the stored job work is linked to — may stay even if DELIVERED. */
-    existingOrderCycleId?: string | null;
+    /** Edit: the stored job work's entry_groups.order_cycle_id, copied as-is onto
+     *  the new version (Customer Cycle removed 2026-11-06 — the column is unused,
+     *  but an old link is kept, not dropped). Never validated. New job works: null. */
+    keepOrderCycleId?: string | null;
     /** Edit: the stored job work to reverse — done inside the same transaction as the save. */
     reverseGroupId?: string;
   }
@@ -347,10 +319,6 @@ export async function createJobWork(
   const touch = givenRequiredTouch(validated.required_touch);
   const receiptRows = validated.gold_receipt.length + validated.ornament_receipt.length;
   assertTouchForReceipts(receiptRows, touch, cycle.required_touch);
-
-  // ── Customer cycle link (optional) ─────────────────────────────────────────
-  // Must exist; must be OPEN unless it is the cycle the edited job work already has.
-  const orderCycleId = await resolveOrderCycleForJobWork(input.order_cycle_id, options?.existingOrderCycleId);
 
   const entries: Parameters<typeof createEntryGroup>[0]["entries"] = [];
 
@@ -594,7 +562,8 @@ export async function createJobWork(
       ratePerGram: input.rate_per_gram,
       remarks: input.remarks,
       jobWorkCycleId: input.bill_cycle_id,
-      orderCycleId,
+      // New job work: null. Edit: the stored link, copied unchanged (unused column).
+      orderCycleId: options?.keepOrderCycleId ?? null,
       tdsAmount: input.tds_amount,
       tcsAmount: input.tcs_amount,
       createdAtFromGroupId: options?.createdAtFromGroupId,
@@ -626,25 +595,19 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
     throw new AppError("NOT_FOUND", "Job work not found");
   }
 
-  // Customer cycle link: omitted (undefined) = keep the stored link, so a client
-  // that doesn't send the field never silently drops it; null = clear it.
-  const orderCycleId =
-    input.order_cycle_id === undefined ? originalGroup.order_cycle_id : input.order_cycle_id;
-  // Check it BEFORE reversing — a refusal after the reversal would leave the
-  // job work reversed with nothing in its place.
-  await resolveOrderCycleForJobWork(orderCycleId, originalGroup.order_cycle_id);
-
   // Any bill (not just the latest) can be edited. The reversal and the new
   // version both keep the original timestamp, so the bill stays in place and
   // every later bill's opening balance picks up the change automatically.
   // The reversal happens INSIDE createJobWork's save transaction (reverseGroupId),
   // so a failed save leaves the stored job work untouched.
   const { id: _removed, ...createInput } = input;
-  return createJobWork({ ...createInput, order_cycle_id: orderCycleId }, {
+  return createJobWork(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
     createdAtFromGroupId: input.id,
-    existingOrderCycleId: originalGroup.order_cycle_id,
+    // Customer Cycle removed (2026-11-06): an old order_cycle_id link is carried
+    // over unchanged (no validation, not editable) so no data is lost.
+    keepOrderCycleId: originalGroup.order_cycle_id,
     reverseGroupId: input.id,
   });
 }

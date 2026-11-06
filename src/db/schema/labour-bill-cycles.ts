@@ -29,11 +29,10 @@ export const labourBillCycles = pgTable(
     bill_no: integer("bill_no").notNull(),
     // Overall purpose / theme of this cycle (user-entered on creation)
     main_reason: text("main_reason"),
-    // Customer cycle (0026): the touch the customer wants the finished ornaments
-    // in — asked once, when the cycle is created. NULL on cycles made before 0026.
+    // required_touch / status / delivered_at: added by 0026 for the Customer Cycle.
+    // Unused since 2026-11-06 (Customer Cycle removed) — columns kept, never read
+    // or written by the app; every cycle takes labour bills whatever its status.
     required_touch: numeric("required_touch", { precision: 6, scale: 2 }),
-    // OPEN = takes new labour bills / job-work links; DELIVERED = closed (bills
-    // already on it can still be edited). Reopen sets it back to OPEN.
     status: text("status", { enum: ["OPEN", "DELIVERED"] }).default("OPEN").notNull(),
     delivered_at: timestamp("delivered_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })

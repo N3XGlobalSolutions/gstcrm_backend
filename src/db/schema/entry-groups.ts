@@ -42,7 +42,8 @@ export const entryGroups = pgTable(
     // For JOB_WORK entries: links to the permanent job-work bill cycle this entry belongs to
     job_work_cycle_id: uuid("job_work_cycle_id").references(() => jobWorkCycles.id),
     // For JOB_WORK entries (0026, optional): the CUSTOMER cycle (labour_bill_cycles)
-    // this job work is done for — the employee works on that customer's order.
+    // this job work was done for. Unused since 2026-11-06 (Customer Cycle removed):
+    // new job works store NULL; an edit copies the old version's value unchanged.
     order_cycle_id: uuid("order_cycle_id").references(() => labourBillCycles.id),
     date: date("date").notNull(),
     type: entryGroupTypeEnum("type").notNull(),
