@@ -232,7 +232,8 @@ describe("customer cycle — end-to-end shop flow", () => {
     goldItemId = await newItem("GOLD", "Gold");
     ornamentItemId = await newItem("ORNAMENT", "Ring");
 
-    const jwCycle = await jw.createCycle({ account_id: employeeId, main_reason: RUN });
+    // Required Touch % on the job-work cycle: its job works have Ornament Receipts.
+    const jwCycle = await jw.createCycle({ account_id: employeeId, main_reason: RUN, required_touch: TOUCH });
     jwCycleId = jwCycle.id;
     expect(jwCycle.account_id).toBe(employeeId);
     expect(jwCycle.bill_no).toBe(1);

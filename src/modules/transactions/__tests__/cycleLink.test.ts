@@ -107,7 +107,8 @@ async function newCustomerCycle(touch = "91.6") {
 
 async function newEmployee() {
   const employeeId = await newAccount("employee");
-  const jwCycle = await jw.createCycle({ account_id: employeeId, main_reason: RUN });
+  // Required Touch % on the job-work cycle: its job works have Ornament Receipts.
+  const jwCycle = await jw.createCycle({ account_id: employeeId, main_reason: RUN, required_touch: "91.6" });
   return { employeeId, jwCycleId: jwCycle.id };
 }
 

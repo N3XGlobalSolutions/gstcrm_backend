@@ -3,6 +3,7 @@ import {
   uuid,
   integer,
   text,
+  numeric,
   timestamp,
   index,
   unique,
@@ -29,6 +30,11 @@ export const jobWorkCycles = pgTable(
     bill_no: integer("bill_no").notNull(),
     // Overall purpose / theme of this cycle (user-entered on creation)
     main_reason: text("main_reason"),
+    // Required Touch % (0027, owner 2026-11-06): the touch the employee's finished
+    // work must come back in — like labour_bill_cycles.required_touch. Optional on
+    // the cycle; a job work with any Gold / Ornament Receipt row needs it (from the
+    // bill form or stored here). NULL on cycles made before 0027.
+    required_touch: numeric("required_touch", { precision: 6, scale: 2 }),
     created_at: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),

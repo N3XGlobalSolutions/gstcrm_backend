@@ -22,7 +22,7 @@ import {
   type ListTxSchema,
   type GetByIdSchema,
   type DeleteTxSchema,
-  type CreateCycleSchema,
+  CreateCycleSchema,
   type ListCyclesSchema,
   type GetCycleDetailSchema,
   type ConvertGoldToCashSchema,
@@ -30,6 +30,7 @@ import {
   type ReceiveCashSchema,
 } from "./schema";
 import { getCycleRefs, resolveOrderCycleForJobWork, type CycleRef } from "../labourBill/cycleLink";
+import { assertTouchForReceipts, givenRequiredTouch } from "./touch";
 
 // The customer cycle a job work is linked to, as returned on getById / list rows.
 function orderCycleView(c: CycleRef | undefined) {
@@ -51,6 +52,11 @@ function orderCycleFields(c: CycleRef | undefined) {
     order_cycle_bill_no: c ? c.bill_no : null,
     order_cycle_customer_name: c ? c.customer_name : null,
   };
+}
+
+/** Required Touch % as stored on job_work_cycles (numeric(6,2)). */
+function touchColumnValue(touch: string): string {
+  return toDecimal(touch).toDecimalPlaces(2).toFixed(2);
 }
 
 // ─── Wastage formula for Job Work ornament items ──────────────────────────────
@@ -89,6 +95,10 @@ function calcOrnamentEntry(item: {
 // The bill_no is auto-incremented per-account (1, 2, 3…).
 
 export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
+  // Validate on every call path (tRPC or direct). Required Touch is optional on a
+  // job-work cycle ("" = none).
+  const parsed = CreateCycleSchema.parse(input);
+  const touch = givenRequiredTouch(parsed.required_touch);
   return db.transaction(async (tx) => {
     // Lock the account row to serialize bill_no generation for this account
     await tx.execute(
@@ -108,7 +118,8 @@ export async function createCycle(input: z.infer<typeof CreateCycleSchema>) {
       .values({
         account_id: input.account_id,
         bill_no: nextBillNo,
-        main_reason: input.main_reason ?? null,
+        main_reason: parsed.main_reason ?? null,
+        required_touch: touch === undefined ? null : touchColumnValue(touch),
       })
       .returning();
 
@@ -311,7 +322,11 @@ export async function createJobWork(
     );
   }
   const [cycle] = await db
-    .select({ bill_no: jobWorkCycles.bill_no, account_id: jobWorkCycles.account_id })
+    .select({
+      bill_no: jobWorkCycles.bill_no,
+      account_id: jobWorkCycles.account_id,
+      required_touch: jobWorkCycles.required_touch,
+    })
     .from(jobWorkCycles)
     .where(eq(jobWorkCycles.id, input.bill_cycle_id))
     .limit(1);
@@ -325,6 +340,13 @@ export async function createJobWork(
     );
   }
   const cycleBillNo: number = cycle.bill_no;
+
+  // ── Required Touch % ───────────────────────────────────────────────────────
+  // Pre-check (outside the transaction) so a refusal costs nothing; the locked
+  // re-check inside the save transaction is what guards a concurrent change.
+  const touch = givenRequiredTouch(validated.required_touch);
+  const receiptRows = validated.gold_receipt.length + validated.ornament_receipt.length;
+  assertTouchForReceipts(receiptRows, touch, cycle.required_touch);
 
   // ── Customer cycle link (optional) ─────────────────────────────────────────
   // Must exist; must be OPEN unless it is the cycle the edited job work already has.
@@ -534,7 +556,30 @@ export async function createJobWork(
   // Edit: reverse the old version and post the new one in ONE transaction, so a
   // failure on either step leaves the stored job work exactly as it was (never
   // reversed with nothing in its place). All checks above run before any write.
+  // The cycle's Required Touch is locked, re-checked and (if the form gives a
+  // different one) updated in the same transaction — all-or-nothing.
   return db.transaction(async (tx) => {
+    const [lockedCycle] = await tx
+      .select({ id: jobWorkCycles.id, required_touch: jobWorkCycles.required_touch })
+      .from(jobWorkCycles)
+      .where(eq(jobWorkCycles.id, input.bill_cycle_id))
+      .for("update");
+    if (!lockedCycle) {
+      throw new AppError("NOT_FOUND", "Selected bill cycle does not exist.");
+    }
+    assertTouchForReceipts(receiptRows, touch, lockedCycle.required_touch);
+    // Given and different from the stored value (compared at the column's 2 dp)
+    // → written to the cycle.
+    if (touch !== undefined) {
+      const next = touchColumnValue(touch);
+      if (lockedCycle.required_touch === null || !toDecimal(lockedCycle.required_touch).eq(next)) {
+        await tx
+          .update(jobWorkCycles)
+          .set({ required_touch: next, updated_at: new Date() })
+          .where(eq(jobWorkCycles.id, lockedCycle.id));
+      }
+    }
+
     if (options?.reverseGroupId) {
       // backdate: the reversal takes the original timestamp, like the new version.
       await reverseEntryGroup(options.reverseGroupId, tx, { backdate: true });

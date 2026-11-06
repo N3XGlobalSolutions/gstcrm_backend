@@ -13,9 +13,25 @@ export const DeleteTxSchema = z.object({ id: z.string().uuid() });
 
 // ─── Bill Cycle schemas ────────────────────────────────────────────────────────
 
+// Required Touch % of a job-work Bill Cycle — same rule as the Labour Bill form's
+// field: optional, "" / whitespace = not given, else 0 < touch ≤ 100 (stored
+// numeric(6,2)). Mandatory (here or stored on the cycle) only when the bill has a
+// Gold or Ornament Receipt row — enforced in createJobWork, not here.
+export const optionalRequiredTouchSchema = z
+  .string()
+  .trim()
+  .refine(v => {
+    if (v === "") return true;
+    const t = Number(v);
+    return !isNaN(t) && t > 0 && t <= 100;
+  }, "Required touch must be greater than 0 and at most 100")
+  .optional();
+
 export const CreateCycleSchema = z.object({
   account_id: z.string().uuid(),
   main_reason: z.string().optional(),
+  // Optional on a job-work cycle; "" = none (stored NULL).
+  required_touch: optionalRequiredTouchSchema,
 });
 
 export const ListCyclesSchema = z.object({
@@ -97,6 +113,13 @@ export const CreateJobWorkSchema = z.object({
   // null = not linked (an edit may clear it); omitted on update = keep the
   // stored link. Stored on entry_groups.order_cycle_id.
   order_cycle_id: z.string().uuid().nullable().optional(),
+
+  // Required Touch % of the bill's job-work cycle (0 < touch ≤ 100). Mandatory
+  // when the bill has any Gold Receipt or Ornament Receipt row and the cycle has
+  // none stored. Given and different from the stored value → the cycle is updated
+  // in the same save transaction. "" = not given. Receipts below the touch are
+  // NOT refused (frontend warning only).
+  required_touch: optionalRequiredTouchSchema,
 
   // 4-direction stock entries (all between SHOP and the account)
   gold_issue:       z.array(GoldItemSchema).default([]),    // SHOP → Account

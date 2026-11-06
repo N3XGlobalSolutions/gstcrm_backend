@@ -245,3 +245,100 @@ describe("updateJobWork", () => {
     expect(Number(view.openingPure)).toBe(0);
   });
 });
+
+// ─── Required Touch % on the job-work Bill Cycle (owner, 2026-11-06) ─────────
+
+async function errorOf(p: PromiseLike<unknown>): Promise<string | null> {
+  try {
+    await p;
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function cycleTouch(cycleId: string): Promise<string | null> {
+  const [c] = await db
+    .select({ required_touch: schema.jobWorkCycles.required_touch })
+    .from(schema.jobWorkCycles)
+    .where(orm.eq(schema.jobWorkCycles.id, cycleId))
+    .limit(1);
+  return c!.required_touch;
+}
+
+const TOUCH_NEEDED = "Required Touch % is needed when the bill has a Gold or Ornament Receipt.";
+const receipt = (grams: string, purity = PURITY) => ({
+  gold_receipt: [{ item_id: goldItemId, quantity: grams, purity }],
+});
+
+describe("job-work cycle Required Touch %", () => {
+  it("5. createCycle stores an optional touch; listCycles / getCycleDetail return it", async () => {
+    const { accountId, cycleId } = await newGoldsmith(); // created without a touch
+    expect(await cycleTouch(cycleId)).toBeNull();
+
+    const withTouch = await svc.createCycle({ account_id: accountId, main_reason: RUN, required_touch: "91.6" });
+    expect(Number(withTouch.required_touch)).toBe(91.6);
+    const blank = await svc.createCycle({ account_id: accountId, main_reason: RUN, required_touch: "" });
+    expect(blank.required_touch).toBeNull();
+
+    const listed = await svc.listCycles({ account_id: accountId });
+    expect(Number(listed.find((c) => c.id === withTouch.id)!.required_touch)).toBe(91.6);
+    const detail = await svc.getCycleDetail({ cycle_id: withTouch.id });
+    expect(Number(detail.cycle.required_touch)).toBe(91.6);
+  });
+
+  it("6. a receipt needs a touch (form or cycle); no receipt → no touch needed", async () => {
+    const { accountId, cycleId } = await newGoldsmith();
+
+    // Issue only: fine without a touch
+    await svc.createJobWork(jobWorkInput(accountId, cycleId, "10"));
+
+    // Gold Receipt / Ornament Receipt with no touch anywhere → refused
+    expect(await errorOf(svc.createJobWork({ ...jobWorkInput(accountId, cycleId, "1"), ...receipt("2") }))).toBe(TOUCH_NEEDED);
+    expect(
+      await errorOf(svc.createJobWork({
+        ...jobWorkInput(accountId, cycleId, "1"),
+        ornament_receipt: [{ item_id: goldItemId, quantity: "2", purity: PURITY, wastage_percent: "0" }],
+        required_touch: "  ",
+      })),
+    ).toBe(TOUCH_NEEDED);
+    expect(await cycleTouch(cycleId)).toBeNull();
+
+    // Form gives the touch → saved and stored on the cycle
+    await svc.createJobWork({ ...jobWorkInput(accountId, cycleId, "1"), ...receipt("2"), required_touch: "91.6" });
+    expect(await cycleTouch(cycleId)).toBe("91.60");
+
+    // Next bill: the cycle's stored touch is enough
+    await svc.createJobWork({ ...jobWorkInput(accountId, cycleId, "1"), ...receipt("1") });
+
+    // A different touch on the form updates the cycle
+    await svc.createJobWork({ ...jobWorkInput(accountId, cycleId, "1"), ...receipt("1"), required_touch: "92.5" });
+    expect(await cycleTouch(cycleId)).toBe("92.50");
+
+    // A receipt BELOW the touch is never refused (frontend warning only)
+    await svc.createJobWork({ ...jobWorkInput(accountId, cycleId, "1"), ...receipt("1", "80") });
+  });
+
+  it("7. edit refused for a missing touch leaves the stored job work untouched", async () => {
+    const { accountId, cycleId } = await newGoldsmith();
+    const { group: orig } = await svc.createJobWork(jobWorkInput(accountId, cycleId, "10"));
+    const before = await pureBalance(accountId);
+
+    const err = await errorOf(svc.updateJobWork({ ...jobWorkInput(accountId, cycleId, "10"), ...receipt("3"), id: orig.id }));
+    expect(err).toBe(TOUCH_NEEDED);
+
+    const stored = await groupRow(orig.id);
+    expect(stored.is_deleted).toBe(false);
+    expect(stored.reversed_by).toBeNull();
+    expect((await liveJobWorkGroups(accountId)).map((g) => g.id)).toEqual([orig.id]);
+    expect(await pureBalance(accountId)).toBe(before);
+    expect(await cycleTouch(cycleId)).toBeNull();
+
+    // With a touch the same edit goes through and the cycle keeps it
+    const { group: edited } = await svc.updateJobWork({
+      ...jobWorkInput(accountId, cycleId, "10"), ...receipt("3"), required_touch: "91.6", id: orig.id,
+    });
+    expect(edited.bill_no).toBe(orig.bill_no);
+    expect(await cycleTouch(cycleId)).toBe("91.60");
+  });
+});
