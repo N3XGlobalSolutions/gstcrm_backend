@@ -324,7 +324,8 @@ export async function createLabourBill(
     existingEntryNo?: number;
     /** Edit: the cycle the stored bill is on — it may stay there even if DELIVERED. */
     existingCycleId?: string | null;
-    /** Edit: the stored version, reversed inside the same save transaction. */
+    /** Edit: the stored version, reversed inside the same save transaction.
+     *  The reversal and the new version both take its created_at (backdated). */
     reverseGroupId?: string;
   }
 ) {
@@ -574,8 +575,11 @@ export async function createLabourBill(
       await applyCycleRequiredTouch(tx, cycle, touch);
     }
 
+    // Edit: any bill (not just the newest) can be edited. The reversal and the
+    // new version both keep the original bill's created_at, so an older bill
+    // stays in its place and every later bill's opening picks up the change.
     if (options?.reverseGroupId) {
-      await reverseEntryGroup(options.reverseGroupId, tx);
+      await reverseEntryGroup(options.reverseGroupId, tx, { backdate: true });
     }
 
     const { group, entries: created } = await createEntryGroup({
@@ -589,6 +593,8 @@ export async function createLabourBill(
       billCycleId: cycle.id,
       tdsAmount: input.tds_amount,
       tcsAmount: input.tcs_amount,
+      // Edit: copy the stored version's timestamp (group + entries) — see above.
+      createdAtFromGroupId: options?.reverseGroupId,
       entries,
     }, tx);
 
@@ -649,6 +655,10 @@ export async function updateLabourBill(input: z.infer<typeof UpdateLabourBillSch
     throw new AppError("NOT_FOUND", "Labour bill not found");
   }
 
+  // Any bill (not just the goldsmith's latest) can be edited. The reversal and
+  // the new version both keep the original timestamp, so the bill stays in
+  // place and every later bill's opening balance picks up the change
+  // automatically. (Delete stays newest-only — see assertDeletableLastBill.)
   // The old version is reversed INSIDE createLabourBill's save transaction
   // (reverseGroupId), so any refusal — closed cycle, missing Required Touch, a
   // concurrent edit — leaves the stored bill untouched.

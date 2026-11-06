@@ -1,8 +1,8 @@
-// Integration test: editing a goldsmith's LATEST labour bill.
+// Integration test: editing a goldsmith's labour bills (latest AND older ones).
 // Runs against a real Postgres DB — set DATABASE_URL to a throwaway test DB.
 //   DATABASE_URL='...' bun test --timeout 60000 src/modules/transactions/__tests__/labourBill.edit.test.ts
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { accounts, entryGroups, items } from "@/db/schema";
 import { getAggregateBalances } from "@/lib/balance";
@@ -48,6 +48,14 @@ async function errorOf(p: Promise<unknown>): Promise<string | null> {
   }
 }
 
+/** Exact (microsecond) DB timestamp text — JS Date would hide sub-ms differences. */
+async function rawCreatedAt(id: string): Promise<string> {
+  const rows = await db.execute<{ ts: string }>(
+    sql`SELECT created_at::text AS ts FROM entry_groups WHERE id = ${id}`,
+  );
+  return rows[0]!.ts;
+}
+
 async function getGroup(id: string) {
   const [g] = await db.select().from(entryGroups).where(eq(entryGroups.id, id)).limit(1);
   return g!;
@@ -90,7 +98,7 @@ beforeAll(async () => {
   goldItemId = item!.id;
 });
 
-describe("Labour Bill edit (latest bill)", () => {
+describe("Labour Bill edit (latest and older bills)", () => {
   it("1. edit gold_issue weight: old group reversed, numbers kept, balance = new weight only", async () => {
     const gs = await makeGoldsmith("case1");
     const created = await createLabourBill(billInput(gs, { qty: "10" }));
@@ -192,6 +200,57 @@ describe("Labour Bill edit (latest bill)", () => {
     const rupee = fetched.entries.filter((e) => e.item_type === "MONEY");
     expect(rupee.length).toBe(1);
     expect(Number(rupee[0]!.entry.quantity)).toBe(4500);
+  });
+
+  it("4. edit an OLD bill: keeps its exact timestamp/position, later bill's opening follows", async () => {
+    const gs = await makeGoldsmith("case4");
+    const a = await createLabourBill(billInput(gs, { qty: "10", bankPaid: "1000" }));
+    await Bun.sleep(1200); // clearly distinct created_at
+    const b = await createLabourBill(billInput(gs, { qty: "5" }));
+
+    // Before the edit B opens with A: 10g @ 92 = 9.2 pure, 1000 cash
+    const bBefore = await getLabourBillById({ id: b.group.id });
+    expect(Number(bBefore.openingPure).toFixed(3)).toBe("9.200");
+    expect(Number(bBefore.openingCash).toFixed(2)).toBe("1000.00");
+
+    const aRawBefore = await rawCreatedAt(a.group.id);
+    const a2 = await updateLabourBill({
+      id: a.group.id,
+      ...billInput(gs, { qty: "20", bankPaid: "2500" }),
+    });
+
+    // Reversal AND new version carry A's exact (microsecond) DB timestamp,
+    // so the edited bill stays before B.
+    const a2Raw = await rawCreatedAt(a2.group.id);
+    const oldA = await getGroup(a.group.id);
+    const revRaw = await rawCreatedAt(oldA.reversed_by!);
+    expect(a2Raw).toBe(aRawBefore);
+    expect(revRaw).toBe(aRawBefore);
+    expect(new Date(a2.group.created_at).getTime()).toBeLessThan(new Date(b.group.created_at).getTime());
+    expect(a2.group.bill_no).toBe(a.group.bill_no);
+    expect(a2.group.entry_no).toBe(a.group.entry_no);
+
+    // Entries of the new version and the reversal are backdated too
+    const entryTs = await db.execute<{ ts: string }>(sql`
+      SELECT DISTINCT created_at::text AS ts FROM entries
+      WHERE group_id IN (${a2.group.id}, ${oldA.reversed_by!})
+    `);
+    expect(entryTs.map((r) => r.ts)).toEqual([aRawBefore]);
+
+    // B's opening now reflects the edited A (20g → 18.4 pure, 2500 cash), not both
+    const bAfter = await getLabourBillById({ id: b.group.id });
+    expect(Number(bAfter.openingPure).toFixed(3)).toBe("18.400");
+    expect(Number(bAfter.openingCash).toFixed(2)).toBe("2500.00");
+
+    // Edited A is the goldsmith's first bill → opening 0 (old + reversal cancel)
+    const aView = await getLabourBillById({ id: a2.group.id });
+    expect(Number(aView.openingPure)).toBe(0);
+    expect(Number(aView.openingCash)).toBe(0);
+
+    // Final balance = edited A + B
+    const bal = await getAggregateBalances(gs.accountId);
+    expect(bal.totalPure.toFixed(3)).toBe("23.000");
+    expect(bal.totalCash.toFixed(2)).toBe("2500.00");
   });
 });
 

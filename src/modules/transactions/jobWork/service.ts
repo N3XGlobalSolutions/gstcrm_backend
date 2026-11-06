@@ -291,6 +291,8 @@ export async function createJobWork(
     createdAtFromGroupId?: string;
     /** Edit: the customer cycle the stored job work is linked to — may stay even if DELIVERED. */
     existingOrderCycleId?: string | null;
+    /** Edit: the stored job work to reverse — done inside the same transaction as the save. */
+    reverseGroupId?: string;
   }
 ) {
   // ── Always validate input regardless of call path (tRPC or direct) ──────────
@@ -529,23 +531,33 @@ export async function createJobWork(
     throw new AppError("VALIDATION_ERROR", "Job work must have at least one entry");
   }
 
-  const { group, entries: created } = await createEntryGroup({
-    type: "JOB_WORK",
-    accountId: input.account_id,
-    date: input.date,
-    billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
-    entryNo: options?.existingEntryNo,
-    ratePerGram: input.rate_per_gram,
-    remarks: input.remarks,
-    jobWorkCycleId: input.bill_cycle_id,
-    orderCycleId,
-    tdsAmount: input.tds_amount,
-    tcsAmount: input.tcs_amount,
-    createdAtFromGroupId: options?.createdAtFromGroupId,
-    entries,
-  });
+  // Edit: reverse the old version and post the new one in ONE transaction, so a
+  // failure on either step leaves the stored job work exactly as it was (never
+  // reversed with nothing in its place). All checks above run before any write.
+  return db.transaction(async (tx) => {
+    if (options?.reverseGroupId) {
+      // backdate: the reversal takes the original timestamp, like the new version.
+      await reverseEntryGroup(options.reverseGroupId, tx, { backdate: true });
+    }
 
-  return { group, entries: created };
+    const { group, entries: created } = await createEntryGroup({
+      type: "JOB_WORK",
+      accountId: input.account_id,
+      date: input.date,
+      billNo: cycleBillNo, // always the real cycle's bill_no (guarded above)
+      entryNo: options?.existingEntryNo,
+      ratePerGram: input.rate_per_gram,
+      remarks: input.remarks,
+      jobWorkCycleId: input.bill_cycle_id,
+      orderCycleId,
+      tdsAmount: input.tds_amount,
+      tcsAmount: input.tcs_amount,
+      createdAtFromGroupId: options?.createdAtFromGroupId,
+      entries,
+    }, tx);
+
+    return { group, entries: created };
+  });
 }
 
 // ─── updateJobWork ────────────────────────────────────────────────────────────
@@ -580,13 +592,15 @@ export async function updateJobWork(input: z.infer<typeof UpdateJobWorkSchema>) 
   // Any bill (not just the latest) can be edited. The reversal and the new
   // version both keep the original timestamp, so the bill stays in place and
   // every later bill's opening balance picks up the change automatically.
-  await reverseEntryGroup(input.id, undefined, { backdate: true });
+  // The reversal happens INSIDE createJobWork's save transaction (reverseGroupId),
+  // so a failed save leaves the stored job work untouched.
   const { id: _removed, ...createInput } = input;
   return createJobWork({ ...createInput, order_cycle_id: orderCycleId }, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
     createdAtFromGroupId: input.id,
     existingOrderCycleId: originalGroup.order_cycle_id,
+    reverseGroupId: input.id,
   });
 }
 
