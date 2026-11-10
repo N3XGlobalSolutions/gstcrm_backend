@@ -108,4 +108,19 @@ describe("computeMeltLoss", () => {
     expect(r.loss_weight).toBe("-0.500");
     expect(r.pure_loss).toBe("-0.450");
   });
+
+  it("uses the received touch even when it is below the required touch", () => {
+    const r = computeMeltLoss([{ weight: "100", touch: "99.5" }], "91.6", [{ metal_id: A, share_percent: "100" }], "108.5", "90");
+    expect(r.out_touch).toBe("90.00");
+    // pure out = 108.5 × 90 / 100 = 97.650; pure loss = 99.5 − 97.65
+    expect(r.pure_out).toBe("97.650");
+    expect(r.pure_loss).toBe("1.850");
+    // weight figures do not depend on the received touch
+    expect(r.expected_weight).toBe("108.624");
+  });
+
+  it("blank received touch falls back to the required touch", () => {
+    const r = computeMeltLoss([{ weight: "100", touch: "99.5" }], "91.6", [], "108.5", null);
+    expect(r.out_touch).toBe("91.60");
+  });
 });

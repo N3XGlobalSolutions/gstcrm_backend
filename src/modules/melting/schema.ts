@@ -104,6 +104,13 @@ const meltingBody = {
     (v) => v === null || Number.parseFloat(v) > 0,
     "After weight must be greater than zero",
   ),
+  // Touch the melted gold actually came back at. Blank = required touch (or the
+  // current touch when there is none). Below required touch is allowed — the
+  // screen warns, it does not block.
+  out_touch: optionalDecimal("Received touch").refine(
+    (v) => v === null || (Number.parseFloat(v) > 0 && Number.parseFloat(v) <= 100),
+    "Received touch must be greater than 0 and at most 100",
+  ),
   lines: z.array(MeltingLineSchema).min(1, "Add at least one line"),
 };
 

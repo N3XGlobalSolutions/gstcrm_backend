@@ -411,7 +411,7 @@ async function prepare(tx: Tx, input: CreateMeltingInput) {
   // Pending (nothing received yet): alloy figures only, loss stays null.
   const loss =
     input.output_item_id !== null && input.after_weight !== null
-      ? computeMeltLoss(lines, input.required_touch, input.alloys, input.after_weight)
+      ? computeMeltLoss(lines, input.required_touch, input.alloys, input.after_weight, input.out_touch)
       : null;
   const calc: AlloyResult = loss ?? computeAlloy(lines, input.required_touch, input.alloys);
   const output =
