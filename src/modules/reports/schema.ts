@@ -28,6 +28,14 @@ export const DetailedReportSchema = z.object({
   account_id: z.string().uuid().optional(),
 });
 
+/** Party's running balance (opening → closing) at every bill of one type. */
+export const CustomerBalanceSchema = z.object({
+  type: z.enum(["SALE", "PURCHASE", "LABOUR_BILL", "JOB_WORK"]),
+  from_date: dateSchema,
+  to_date: dateSchema,
+  account_id: z.string().uuid().optional(),
+});
+
 export const BankReportSchema = z.object({
   from_date: dateSchema,
   to_date: dateSchema,
@@ -43,5 +51,6 @@ export const StockReportSchema = z.object({
 
 export type TransactionReportInput = z.infer<typeof TransactionReportSchema>;
 export type DetailedReportInput = z.infer<typeof DetailedReportSchema>;
-export type BankReportInput = z.infer<typeof BankReportSchema>;
+export type CustomerBalanceInput = z.infer<typeof CustomerBalanceSchema>;
+export type BankReportInput =z.infer<typeof BankReportSchema>;
 export type StockReportInput = z.infer<typeof StockReportSchema>;

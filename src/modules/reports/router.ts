@@ -1,6 +1,7 @@
 import { router, protectedProcedure } from "@/lib/trpc";
 import {
   BankReportSchema,
+  CustomerBalanceSchema,
   DetailedReportSchema,
   StockReportSchema,
   TransactionReportSchema,
@@ -11,6 +12,7 @@ import {
   getStockReport,
   getTransactionReport,
 } from "./service";
+import { getCustomerBalanceReport } from "./customerBalance";
 
 export const reportsRouter = router({
   // Sales / Purchase / Labour Bill / Job Work / Expense — day- or month-wise.
@@ -23,6 +25,11 @@ export const reportsRouter = router({
   detailed: protectedProcedure
     .input(DetailedReportSchema)
     .query(async ({ input }) => getDetailedReport(input)),
+
+  // Party's opening → closing balance at every bill of one type.
+  customerBalance: protectedProcedure
+    .input(CustomerBalanceSchema)
+    .query(async ({ input }) => getCustomerBalanceReport(input)),
 
   bank: protectedProcedure
     .input(BankReportSchema)
