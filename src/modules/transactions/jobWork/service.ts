@@ -30,6 +30,7 @@ import {
   type ReceiveCashSchema,
 } from "./schema";
 import { assertTouchForReceipts, givenRequiredTouch } from "./touch";
+import { conversionEntries } from "../labourBill/inBillConversion";
 
 /** Required Touch % as stored on job_work_cycles (numeric(6,2)). */
 function touchColumnValue(touch: string): string {
@@ -467,7 +468,16 @@ export async function createJobWork(
     });
   }
 
-  // ── 6.5. Discount ──────────────────────────────────────────────────────────
+  // The Issue & Job Works slip (IssueJobWorksContext) shows the balance from the
+  // SHOP's side — display = −raw, positive = the shop owes the employee:
+  //   cash = slipPure × rate + conversionCash + bankReceive
+  //        − (bankPaid + discount + tds − tcs)
+  // Discount and TDS lower what the SHOP owes the employee (display −) = raise the
+  // raw balance → SHOP → employee. TCS is the mirror (employee → SHOP). Checked
+  // 2026-11-11: these directions already match the slip — unlike the Labour Bill,
+  // whose slip shows the raw balance and posts them the other way.
+
+  // ── 6.5. Discount — lowers what the shop owes the employee (SHOP → employee).
   if (input.discount && toDecimal(input.discount).gt(0)) {
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
@@ -478,8 +488,8 @@ export async function createJobWork(
     });
   }
 
-  // ── 6.6. TDS — subtracts from what the account owes (SHOP → account, same
-  // direction/effect as a discount). Mirrors createLabourBill. ───────────────
+  // ── 6.6. TDS — lowers what the shop owes the employee (SHOP → employee, same
+  // direction/effect as a discount; see the slip formula above). ─────────────
   if (input.tds_enabled && input.tds_amount && toDecimal(input.tds_amount).gt(0)) {
     entries.push({
       fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
@@ -490,7 +500,7 @@ export async function createJobWork(
     });
   }
 
-  // ── 6.7. TCS — adds to what the account owes (account → SHOP). ────────────
+  // ── 6.7. TCS — raises what the shop owes the employee (employee → SHOP). ──
   if (input.tcs_enabled && input.tcs_amount && toDecimal(input.tcs_amount).gt(0)) {
     entries.push({
       fromAccountId: input.account_id,
@@ -502,18 +512,13 @@ export async function createJobWork(
   }
 
   // ── 7. Partial Cash Conversions ─────────────────────────────────────────────
-  // Each conversion records that the account now owes cash instead of pure gold.
-  // The account sends cash_amount worth of their gold debt to SHOP as a MONEY entry.
+  // The slip (display = −raw) takes gold_grams off the gold the shop owes the
+  // employee and adds cash_amount to the cash the shop owes them
+  // (slipBalancePure −= grams, cashIn += cash). In raw terms: pure +grams,
+  // cash −amount. Before 2026-11-11 only the cash line was posted (the gold side
+  // was missing) — scripts/audit-labour-direction.mjs lists those bills.
   for (const conversion of input.cash_conversions) {
-    if (toDecimal(conversion.cash_amount).gt(0)) {
-      entries.push({
-        fromAccountId: input.account_id,
-        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-        quantity: conversion.cash_amount,
-        remarks: `Cash conversion: ${conversion.gold_grams}g @ ₹${conversion.rate_per_gram}/g`,
-      });
-    }
+    entries.push(...conversionEntries(input.account_id, conversion, "RAISE_PURE"));
   }
 
   // Guard: must have at least one entry

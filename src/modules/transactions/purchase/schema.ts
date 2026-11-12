@@ -18,10 +18,13 @@ export const DeleteTxSchema = z.object({ id: z.string().uuid() });
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format, expected YYYY-MM-DD");
 const positiveDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Must be greater than zero");
 const nonNegativeDecimalSchema = z.string().refine(v => !isNaN(parseFloat(v)) && parseFloat(v) >= 0, "Must be non-negative");
+// Touch 0 is allowed: it is a DIRECT purchase (bought by weight × rate, no pure).
+// createPurchase refuses a touch-0 row unless the bill is kept in Cash. (Purchase
+// only — Sales still requires touch > 0, owner decision 2026-11-11.)
 const puritySchema = z.string().refine(v => {
   const p = parseFloat(v);
-  return !isNaN(p) && p > 0 && p <= 100;
-}, "Purity must be between 0.01% and 100%");
+  return !isNaN(p) && p >= 0 && p <= 100;
+}, "Purity must be between 0% and 100%");
 
 const PurchaseItemSchema = z.object({
   item_id: z.string().uuid(),

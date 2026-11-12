@@ -19,9 +19,13 @@ import type {
 
 // ─── Find or create expense account by name ───────────────────────────────────
 
-async function findOrCreateExpenseAccount(name: string): Promise<string> {
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// Runs inside the caller's save transaction, so a refused save never leaves a
+// freshly created expense account behind.
+async function findOrCreateExpenseAccount(tx: Tx, name: string): Promise<string> {
   // Try find existing EXPENSE account with this name
-  const [existing] = await db
+  const [existing] = await tx
     .select({ id: accounts.id })
     .from(accounts)
     .where(
@@ -36,13 +40,11 @@ async function findOrCreateExpenseAccount(name: string): Promise<string> {
   if (existing) return existing.id;
 
   // Create a new EXPENSE account
-  const entry_no = await generateEntryNo(db, "accounts", "EXPENSE");
-  const [created] = await db.transaction((tx) =>
-    tx
-      .insert(accounts)
-      .values({ entry_no, name, type: "EXPENSE" })
-      .returning({ id: accounts.id }),
-  );
+  const entry_no = await generateEntryNo(tx, "accounts", "EXPENSE");
+  const [created] = await tx
+    .insert(accounts)
+    .values({ entry_no, name, type: "EXPENSE" })
+    .returning({ id: accounts.id });
 
   return created!.id;
 }
@@ -108,14 +110,25 @@ export async function getExpenseById(input: z.infer<typeof GetByIdSchema>) {
 
 export async function createExpense(
   input: z.infer<typeof CreateExpenseSchema>,
-  options?: { existingBillNo?: number; existingEntryNo?: number }
+  options?: {
+    existingBillNo?: number;
+    existingEntryNo?: number;
+    /** Edit: the stored version to reverse inside the same save transaction. */
+    reverseGroupId?: string;
+  }
 ) {
   if (toDecimal(input.amount).lte(0)) {
     throw new AppError("VALIDATION_ERROR", "Amount must be greater than zero");
   }
 
+  // One transaction: on an edit the old version's reversal and the new version
+  // commit or roll back together — a refused save leaves the original intact.
   return db.transaction(async (tx) => {
-    const expense_account_id = await findOrCreateExpenseAccount(input.name);
+    if (options?.reverseGroupId) {
+      await reverseEntryGroup(options.reverseGroupId, tx);
+    }
+
+    const expense_account_id = await findOrCreateExpenseAccount(tx, input.name);
 
     const bill_no = options?.existingBillNo ?? await generateBillNo(tx, SYSTEM_ACCOUNTS.EXPENSE_ID, "EXPENSE");
 
@@ -150,20 +163,29 @@ export async function updateExpense(input: z.infer<typeof UpdateExpenseSchema>) 
     .select({
       bill_no: entryGroups.bill_no,
       entry_no: entryGroups.entry_no,
+      type: entryGroups.type,
+      is_deleted: entryGroups.is_deleted,
     })
     .from(entryGroups)
     .where(eq(entryGroups.id, input.id))
     .limit(1);
 
-  if (!originalGroup) {
+  // Only a live EXPENSE may be edited here. Any other id (a sale, a melting…)
+  // would otherwise be reversed by this edit — silently undoing that record.
+  if (!originalGroup || originalGroup.type !== "EXPENSE") {
     throw new AppError("NOT_FOUND", "Expense not found");
   }
+  // An old (already edited) version keeps the message the reversal gives.
+  if (originalGroup.is_deleted) {
+    throw new AppError("CONFLICT", "Transaction already reversed");
+  }
 
-  await reverseEntryGroup(input.id);
+  // Reverse + re-create in ONE transaction (reverseGroupId) — see createExpense.
   const { id: _removed, ...createInput } = input;
   return createExpense(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
+    reverseGroupId: input.id,
   });
 }
 

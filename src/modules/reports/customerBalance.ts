@@ -7,7 +7,7 @@
 //   bill    = what this bill itself moved (every entry in the bill's group,
 //             including payments added to it later from the Pay popup)
 //   closing = opening + bill
-// Plus each party's balance as on the To date (covers conversions and payments
+// Plus each party's balance as on the To date, by bill date (covers conversions and payments
 // made after their last bill).
 //
 // Signs follow the bill prints:
@@ -15,14 +15,12 @@
 //   Purchase                       → positive = shop owes the supplier
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, lte, ne, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { accounts, entries, entryGroups } from "@/db/schema";
 import { SYSTEM_ITEMS } from "@/config/constants";
 import { getBatchAggregateBalances } from "@/lib/balance";
 import type { CustomerBalanceInput } from "./schema";
-
-const NO_GROUP = "00000000-0000-0000-0000-000000000000";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -46,7 +44,7 @@ export interface CustomerBalanceParty {
   account_id: string;
   party_name: string;
   bills: number;
-  /** Balance as on the To date (end of day, Asia/Kolkata). */
+  /** Balance as on the To date: every bill / payment dated on or before it. */
   balance_pure: number;
   balance_cash: number;
 }
@@ -139,31 +137,56 @@ export async function getCustomerBalanceReport(
     };
   });
 
-  // Each party's balance as on the To date (end of that day in India).
+  // Each party's balance as on the To date, by BILL DATE (entry_groups.date), so a
+  // bill dated in the range but keyed in later still counts. Same sums as the
+  // ledger balance (pure_quantity both ways, RUPEE quantity for cash). An edited or
+  // deleted bill leaves its original soft-deleted plus a REVERSAL group carrying
+  // the same date that cancels it; both are skipped, so they net to zero
+  // whatever their dates.
   const partyMap = new Map<string, { name: string; bills: number }>();
   for (const g of groups) {
     const p = partyMap.get(g.accountId);
     if (p) p.bills += 1;
     else partyMap.set(g.accountId, { name: g.party, bills: 1 });
   }
-  const asOf = new Date(`${input.to_date}T23:59:59.999+05:30`);
-  const balances = await getBatchAggregateBalances(
-    Array.from(partyMap.keys(), (accountId) => ({
-      id: accountId,
-      accountId,
-      createdAt: asOf,
-      excludeGroupId: NO_GROUP,
-    })),
-  );
+  const partyIds = Array.from(partyMap.keys());
+  const balanceRows = await db
+    .select({
+      accountId: accounts.id,
+      pure: sql<string>`COALESCE(SUM(
+          CASE WHEN ${entries.to_account_id} = ${accounts.id} THEN COALESCE(${entries.pure_quantity}, 0) ELSE 0 END
+        - CASE WHEN ${entries.from_account_id} = ${accounts.id} THEN COALESCE(${entries.pure_quantity}, 0) ELSE 0 END
+        ), 0)::text`,
+      cash: sql<string>`COALESCE(SUM(CASE WHEN ${entries.item_id} <> ${cashItemId} THEN 0 ELSE
+          CASE WHEN ${entries.to_account_id} = ${accounts.id} THEN ${entries.quantity} ELSE 0 END
+        - CASE WHEN ${entries.from_account_id} = ${accounts.id} THEN ${entries.quantity} ELSE 0 END
+        END), 0)::text`,
+    })
+    .from(accounts)
+    .innerJoin(
+      entries,
+      or(eq(entries.to_account_id, accounts.id), eq(entries.from_account_id, accounts.id)),
+    )
+    .innerJoin(entryGroups, eq(entries.group_id, entryGroups.id))
+    .where(
+      and(
+        inArray(accounts.id, partyIds),
+        eq(entryGroups.is_deleted, false),
+        ne(entryGroups.type, "REVERSAL"),
+        lte(entryGroups.date, input.to_date),
+      ),
+    )
+    .groupBy(accounts.id);
+  const balances = new Map(balanceRows.map((r) => [r.accountId, r]));
 
   const parties: CustomerBalanceParty[] = Array.from(partyMap, ([accountId, p]) => {
-    const b = balances[accountId]!;
+    const b = balances.get(accountId);
     return {
       account_id: accountId,
       party_name: p.name,
       bills: p.bills,
-      balance_pure: round3(sign * (Number(b.totalPure.toString()) || 0)),
-      balance_cash: round2(sign * (Number(b.totalCash.toString()) || 0)),
+      balance_pure: round3(sign * (Number(b?.pure ?? 0) || 0)),
+      balance_cash: round2(sign * (Number(b?.cash ?? 0) || 0)),
     };
   }).sort((a, b) => a.party_name.localeCompare(b.party_name));
 

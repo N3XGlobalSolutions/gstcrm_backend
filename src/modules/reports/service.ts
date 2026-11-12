@@ -52,6 +52,15 @@ function isNonPaymentRemark(remark: string): boolean {
 }
 
 /** Grams converted, parsed back out of a "Cash conversion: 1.234g @ ₹…" remark. */
+/**
+ * TDS / TCS of a bill. The group's saved figure is authoritative; Sales and
+ * Purchase leave it empty and post a "TDS Adjustment" / "TCS Adjustment" money
+ * line instead, so the summed lines are the fallback.
+ */
+function billTax(saved: string | null, fromLines: number): number {
+  return round2(num(saved) || fromLines);
+}
+
 function conversionGrams(remark: string): number {
   const match = /^Cash conversion:\s*([\d.]+)\s*g/i.exec(remark);
   return match ? Number.parseFloat(match[1] ?? "0") || 0 : 0;
@@ -189,6 +198,8 @@ export async function getTransactionReport(input: TransactionReportInput) {
           purity: entries.purity,
           pure: entries.pure_quantity,
           rate: entries.rate,
+          wastageMode: entries.wastage_mode,
+          wastageValue: entries.wastage_value,
           remarks: entries.remarks,
           itemType: items.type,
           itemName: items.name,
@@ -205,6 +216,7 @@ export async function getTransactionReport(input: TransactionReportInput) {
     linesByGroup.set(line.groupId, list);
   }
 
+  const isSale = input.type === "SALE";
   const bills: ReportBill[] = realGroups.map((g) => {
     const groupRate = num(g.ratePerGram);
     const bill: ReportBill = {
@@ -215,12 +227,12 @@ export async function getTransactionReport(input: TransactionReportInput) {
       party: g.party,
       items: "",
       ...emptyTotals(),
-      tds: num(g.tds),
-      tcs: num(g.tcs),
       remarks: g.remarks,
     };
 
     const itemNames = new Set<string>();
+    let tdsLines = 0;
+    let tcsLines = 0;
 
     for (const line of linesByGroup.get(g.id) ?? []) {
       const qty = num(line.quantity);
@@ -232,6 +244,8 @@ export async function getTransactionReport(input: TransactionReportInput) {
         const remark = line.remarks || "";
         if (remark === "GST") bill.gst += qty;
         else if (remark === "Discount") bill.discount += qty;
+        else if (remark === "TDS Adjustment") tdsLines += qty;
+        else if (remark === "TCS Adjustment") tcsLines += qty;
         else if (!isNonPaymentRemark(remark)) {
           // An expense is paid out of CASH/BANK rather than SHOP, so any money
           // leaving towards the party counts as cash out.
@@ -242,10 +256,9 @@ export async function getTransactionReport(input: TransactionReportInput) {
       }
 
       itemNames.add(line.itemName);
-      const pure = num(line.pure) || (qty * num(line.purity)) / 100;
-      const rate = num(line.rate) || groupRate;
-      // A touch-0 line is a direct sale/purchase, valued on weight.
-      const value = (pure > 0 ? pure : qty) * rate;
+      // Same valuation as the Detailed report (a cash-mode sale line keeps its wastage).
+      const pure = linePure(line, { sale: isSale });
+      const value = lineGoodsAmount(line, groupRate, { sale: isSale });
 
       if (intoShop) {
         bill.weightIn += qty;
@@ -261,6 +274,8 @@ export async function getTransactionReport(input: TransactionReportInput) {
 
     // An expense has no goods — its amount is the money it paid out.
     if (input.type === "EXPENSE") bill.amount = bill.cashOut;
+    bill.tds = billTax(g.tds, tdsLines);
+    bill.tcs = billTax(g.tcs, tcsLines);
 
     // GST is the "GST" ledger entry, already counted above. (gstcrm stores no
     // per-bill GST %, so GST-inclusive bills are not estimated.)
@@ -493,13 +508,13 @@ export async function getDetailedReport(input: DetailedReportInput): Promise<{ b
 
       const itemType = line.itemType === "ORNAMENT" ? "ORNAMENT" : "GOLD";
       const touch = num(line.purity);
-      const pure = linePure(line);
+      const pure = linePure(line, { sale: input.type === "SALE" });
       const rate = num(line.rate) || groupRate;
       // Purchase lines carry a placeholder wastage % with no defined formula yet —
       // report no wastage for purchases.
       const wastage = input.type === "PURCHASE" ? 0 : wastageGramsOf(line);
       // A touch-0 line is a direct sale/purchase, valued on weight.
-      const amount = isTrade ? lineGoodsAmount(line, groupRate) : 0;
+      const amount = isTrade ? lineGoodsAmount(line, groupRate, { sale: input.type === "SALE" }) : 0;
       const section: DetailedLineSection = `${itemType}_${intoShop ? "RECEIPT" : "ISSUE"}`;
 
       goodsAmount += amount;
@@ -547,9 +562,8 @@ export async function getDetailedReport(input: DetailedReportInput): Promise<{ b
       hallmark: round2(hallmark),
       hallmark_gst: round2(hallmarkGst),
       gst: round2(gst),
-      // The group's saved figure is authoritative; the ledger line is the fallback.
-      tds: round2(num(g.tds) || tdsLines),
-      tcs: round2(num(g.tcs) || tcsLines),
+      tds: billTax(g.tds, tdsLines),
+      tcs: billTax(g.tcs, tcsLines),
       discount: round2(discount),
       round_off: round2(roundOff),
       cash_paid: round2(cashPaid),

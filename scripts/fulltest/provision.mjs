@@ -5,6 +5,10 @@
 //   node scripts/fulltest/provision.mjs create   -> create db + migrate + seed
 //   node scripts/fulltest/provision.mjs drop     -> terminate + drop db
 //   node scripts/fulltest/provision.mjs url      -> print TEST_DATABASE_URL only
+//
+// Database name: FULLTEST_DB env var (default gstcrm_fullcycle_test). It MUST
+// end in "_test" — anything else (e.g. the real "neondb") is refused, so this
+// script can never create, migrate or drop a real database.
 import { config } from "dotenv";
 import pg from "pg";
 import { readFileSync, readdirSync } from "fs";
@@ -14,7 +18,10 @@ import { dirname, join } from "path";
 config();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "..", "..", "src", "db", "migrations");
-const TEST_DB = "goldcrm_fullcycle_test";
+const TEST_DB = process.env.FULLTEST_DB || "gstcrm_fullcycle_test";
+if (!/^[a-z0-9_]+_test$/.test(TEST_DB)) {
+  throw new Error(`Refusing to use database "${TEST_DB}": test database names must match [a-z0-9_]+_test`);
+}
 const raw = process.env.DATABASE_URL;
 if (!raw) throw new Error("DATABASE_URL missing");
 
@@ -114,7 +121,8 @@ async function run() {
   console.log(`✅ created ${TEST_DB}`);
   await migrateAndSeed();
   console.log("✅ migrated + seeded");
-  console.log("TEST_DATABASE_URL=" + testUrl.toString());
+  const shown = new URL(testUrl.toString()); shown.password = "****";
+  console.log("TEST_DATABASE_URL=" + shown.toString());
 }
 
 run().catch((e) => { console.error("PROVISION ERROR:", e.message); process.exit(1); });

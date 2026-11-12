@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNotNull, lte, ne, notInArray } from "drizzle-orm";
+import { and, asc, eq, isNotNull, lte, ne, notInArray, notLike } from "drizzle-orm";
 import { db } from "@/db";
 import {
   accounts,
@@ -135,6 +135,9 @@ const NON_BANK_REMARKS = [
   "Round Off",
 ];
 
+/** Remarks that START with these are conversions, never bank money. */
+const NON_BANK_REMARK_PREFIXES = ["Cash conversion:", "Gold to Cash Conversion", "Cash to Gold Conversion"];
+
 export type BankTxnDirection = "CREDIT" | "DEBIT";
 
 export interface BankTransaction {
@@ -188,18 +191,28 @@ function matchBank(
 }
 
 // Bank payments recorded inside purchase/sales/expense/labour/job-work bills.
+// Everything up to the To date is loaded (no From-date cut): getBankLedger folds
+// the movements before the From date into each bank's opening balance.
 async function loadBillTransactions(
   banks: BankAccountConfig[],
   input: BankLedgerInput,
 ): Promise<BankTransaction[]> {
   const conditions = [
+    // An edited or deleted bill leaves its original soft-deleted plus a REVERSAL
+    // group that cancels it (same bank remark, from/to swapped). Skipping both
+    // nets to zero; skipping only the original turned a receipt into a withdrawal.
     eq(entryGroups.is_deleted, false),
+    ne(entryGroups.type, "REVERSAL"),
     eq(entries.item_id, SYSTEM_ITEMS.RUPEE_ITEM_ID),
     isNotNull(entries.remarks),
     ne(entries.remarks, ""),
     notInArray(entries.remarks, NON_BANK_REMARKS),
+    // Gold↔cash conversions move a party's debt between gold and cash — no
+    // money changes hands, so they never belong in a bank ledger: in-bill
+    // "Cash conversion: …" lines (labour bill / job works) and the Convert
+    // button's "Gold to Cash Conversion (…)" / "Cash to Gold Conversion (…)".
+    ...NON_BANK_REMARK_PREFIXES.map((p) => notLike(entries.remarks, `${p}%`)),
   ];
-  if (input.from_date) conditions.push(gte(entryGroups.date, input.from_date));
   if (input.to_date) conditions.push(lte(entryGroups.date, input.to_date));
 
   const rows = await db
@@ -252,14 +265,13 @@ async function loadBillTransactions(
   });
 }
 
-// Deposits, withdrawals and transfers entered on the Bank page.
+// Deposits, withdrawals and transfers entered on the Bank page. Like bill
+// payments, loaded up to the To date only — the From date is applied in getBankLedger.
 async function loadManualTransactions(
   banks: BankAccountConfig[],
   input: BankLedgerInput,
 ): Promise<BankTransaction[]> {
   const conditions = [];
-  if (input.from_date)
-    conditions.push(gte(bankTransactions.date, input.from_date));
   if (input.to_date) conditions.push(lte(bankTransactions.date, input.to_date));
 
   const rows = await db
@@ -303,8 +315,14 @@ export async function getBankLedger(input: BankLedgerInput) {
     loadManualTransactions(banks, input),
   ]);
 
-  let all = [...billTxns, ...manualTxns];
-  if (input.bankKey) all = all.filter((t) => t.bankKey === input.bankKey);
+  let loaded = [...billTxns, ...manualTxns];
+  if (input.bankKey) loaded = loaded.filter((t) => t.bankKey === input.bankKey);
+
+  // Money moved before the From date is not listed, but it is part of the
+  // opening balance on the From date: configured opening + every earlier movement.
+  const fromDate = input.from_date;
+  const before = fromDate ? loaded.filter((t) => t.date < fromDate) : [];
+  const all = fromDate ? loaded.filter((t) => t.date >= fromDate) : loaded;
 
   // Oldest first so each bank's running balance builds forward from its opening.
   all.sort((a, b) => {
@@ -347,6 +365,12 @@ export async function getBankLedger(input: BankLedgerInput) {
     });
   }
 
+  for (const txn of before) {
+    const summary = ensureSummary(txn);
+    summary.opening += txn.direction === "CREDIT" ? txn.amount : -txn.amount;
+  }
+  for (const summary of summaries.values()) summary.opening = round2(summary.opening);
+
   const running = new Map<string, number>();
   for (const txn of all) {
     const summary = ensureSummary(txn);
@@ -369,6 +393,7 @@ export async function getBankLedger(input: BankLedgerInput) {
     // Drop the Unassigned bucket unless something actually landed in it.
     (s) =>
       s.key !== UNASSIGNED_KEY ||
+      s.opening !== 0 ||
       all.some((t) => t.bankKey === UNASSIGNED_KEY),
   );
 

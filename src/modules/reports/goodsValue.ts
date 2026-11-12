@@ -1,6 +1,8 @@
 import { and, eq, gte, inArray, isNotNull, lte } from "drizzle-orm";
 import { db } from "@/db";
 import { entryGroups } from "@/db/schema";
+import type Decimal from "decimal.js";
+import { calcWastageGram, calcWastagePercent, toDecimal, toQuantityString } from "@/lib/decimal";
 
 const num = (v: string | null | undefined) => Number.parseFloat(v || "0") || 0;
 
@@ -14,23 +16,71 @@ export function isConversion(remarks: string | null): boolean {
   return text.startsWith("Gold to Cash Conversion") || text.startsWith("Cash to Gold Conversion");
 }
 
-/** Pure grams of a goods line — the stored figure, else weight × touch. */
-export function linePure(line: { quantity: string; purity: string | null; pure: string | null }): number {
-  return num(line.pure) || (num(line.quantity) * num(line.purity)) / 100;
+export interface GoodsLine {
+  quantity: string;
+  purity: string | null;
+  pure: string | null;
+  wastageMode?: string | null;
+  wastageValue?: string | null;
+}
+
+export interface GoodsValueOptions {
+  /**
+   * The line is on a SALE bill. A sale bills (weight + wastage); in Cash mode (and
+   * on a touch-0 direct line) the line is saved with pure_quantity 0 and the value
+   * lives only in the "Cash Sale Charge", so it is rebuilt here from the line's
+   * wastage exactly the way createSale computed it. Purchases ignore wastage.
+   */
+  sale?: boolean;
+}
+
+/**
+ * Weight a sale line was billed on: physical weight + wastage (unrounded) —
+ * mirrors createSale step 1 (PERCENT: weight × wastage% ÷ touch; GRAM: weight × value).
+ */
+function saleBilledWeight(line: GoodsLine): Decimal {
+  const qty = line.quantity || "0";
+  const touch = line.purity || "0";
+  const value = line.wastageValue || "0";
+  let wastage = toDecimal(0);
+  if ((line.wastageMode || "PERCENT") === "PERCENT") {
+    if (toDecimal(value).gt(0) && toDecimal(touch).gt(0)) wastage = calcWastagePercent(qty, value, touch);
+  } else {
+    wastage = calcWastageGram(qty, value);
+  }
+  return toDecimal(qty).plus(wastage);
+}
+
+/**
+ * Pure grams of a goods line — the stored figure, else weight × touch (for a sale,
+ * (weight + wastage) × touch, which is what the bill charged).
+ */
+export function linePure(line: GoodsLine, opts: GoodsValueOptions = {}): number {
+  const stored = num(line.pure);
+  if (stored) return stored;
+  if (opts.sale) {
+    const billed = saleBilledWeight(line);
+    return num(toQuantityString(billed.mul(toDecimal(line.purity || "0").div(100))));
+  }
+  return (num(line.quantity) * num(line.purity)) / 100;
 }
 
 /**
  * Goods value of one sale / purchase line (no GST, TDS, TCS, discount or round-off):
- * pure × rate, where a touch-0 line is a direct sale/purchase valued on weight.
- * The line's own rate wins; the bill's rate-per-gram is the fallback.
+ * pure × rate, where a touch-0 line is a direct sale/purchase valued on weight
+ * (weight + wastage on a sale). The line's own rate wins; the bill's
+ * rate-per-gram is the fallback.
  */
 export function lineGoodsAmount(
-  line: { quantity: string; purity: string | null; pure: string | null; rate: string | null },
+  line: GoodsLine & { rate: string | null },
   groupRate: number,
+  opts: GoodsValueOptions = {},
 ): number {
-  const pure = linePure(line);
+  const pure = linePure(line, opts);
   const rate = num(line.rate) || groupRate;
-  return (pure > 0 ? pure : num(line.quantity)) * rate;
+  if (pure > 0) return pure * rate;
+  const weight = opts.sale ? num(toQuantityString(saleBilledWeight(line))) : num(line.quantity);
+  return weight * rate;
 }
 
 /** 1 Apr – 31 Mar financial year containing today (India time), as YYYY-MM-DD. */

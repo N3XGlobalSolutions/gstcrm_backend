@@ -86,10 +86,16 @@ export async function getAggregateBalances(
   asOfDate?: Date,
   excludeGroupId?: string,
 ): Promise<{ totalPure: Decimal; totalCash: Decimal; balancePure: Decimal; goldCashOut: Decimal; goldCashIn: Decimal; pureNoRate: Decimal }> {
+  // With an excluded bill, cut off at that bill's exact created_at from the
+  // database (microseconds) — see the note in getBatchAggregateBalances.
   const dateFilter = asOfDate
-    ? sql`AND e.created_at <= ${asOfDate.toISOString()}`
+    ? excludeGroupId
+      ? sql`AND e.created_at <= COALESCE(
+          (SELECT g0.created_at FROM entry_groups g0 WHERE g0.id = ${excludeGroupId}),
+          ${asOfDate.toISOString()}::timestamptz)`
+      : sql`AND e.created_at <= ${asOfDate.toISOString()}`
     : sql``;
-    
+
   const excludeFilter = excludeGroupId
     ? sql`AND e.group_id != ${excludeGroupId}`
     : sql``;
@@ -215,11 +221,23 @@ export async function getBatchAggregateBalances(
     (t) => sql`(${t.id}::text, ${t.accountId}::uuid, ${t.createdAt.toISOString()}::timestamp, ${t.excludeGroupId}::uuid)`
   );
   
+  // The cut-off is the excluded bill's OWN created_at read from the database,
+  // not the JS Date passed in: a JS Date keeps only milliseconds, and an edit
+  // writes its reversal and the new bill in one transaction with the exact
+  // same microsecond timestamp — a millisecond cut-off would drop the
+  // reversal and count the old bill in the new bill's opening. The passed
+  // date is only the fallback when the group is not found.
   const query = sql`
-    WITH params(id, account_id, created_at, exclude_group_id) AS (
+    WITH raw(id, account_id, created_at, exclude_group_id) AS (
       VALUES ${sql.join(valuesChunks, sql`, `)}
+    ),
+    params AS (
+      SELECT r.id, r.account_id, r.exclude_group_id,
+             COALESCE(g0.created_at, r.created_at::timestamptz) AS created_at
+      FROM raw r
+      LEFT JOIN entry_groups g0 ON g0.id = r.exclude_group_id
     )
-    SELECT 
+    SELECT
       p.id,
       SUM(CASE WHEN e.to_account_id = p.account_id AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.pure_quantity ELSE 0 END)::text AS pure_inflow,
       SUM(CASE WHEN e.from_account_id = p.account_id AND e.created_at <= p.created_at AND e.group_id != p.exclude_group_id THEN e.pure_quantity ELSE 0 END)::text AS pure_outflow,

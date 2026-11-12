@@ -29,6 +29,7 @@ import {
   type ConvertCashToGoldSchema,
   type ReceiveCashSchema,
 } from "./schema";
+import { conversionEntries } from "./inBillConversion";
 
 // ─── Wastage formula for Labour Bill ornament items ───────────────────────────
 // wastage_gm = (weight × wastage_percent/100) / (touch/100)
@@ -439,34 +440,43 @@ export async function createLabourBill(
     });
   }
 
-  // ── 6.5. Discount ──────────────────────────────────────────────────────────
+  // Raw ledger sign for a goldsmith: positive = goldsmith owes the shop; an entry
+  // TO the goldsmith raises it, an entry FROM the goldsmith lowers it. The slip
+  // (LabourBillContext) is the source of truth:
+  //   cash = slipPure × rate + conversionCash + bankPaid
+  //        − (bankReceive + discount + tds − tcs)
+  // so Discount and TDS LOWER what the goldsmith owes (goldsmith → SHOP) and TCS
+  // RAISES it (SHOP → goldsmith). Bills saved before 2026-11-11 posted these the
+  // other way round — scripts/audit-labour-direction.mjs lists them (read-only).
+
+  // ── 6.5. Discount — lowers what the goldsmith owes (goldsmith → SHOP). ────
   if (input.discount && toDecimal(input.discount).gt(0)) {
     entries.push({
-      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-      toAccountId: input.account_id,
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
       quantity: input.discount,
       remarks: "Discount",
     });
   }
 
-  // ── 6.6. TDS — subtracts from what the goldsmith owes (SHOP → goldsmith,
-  // same direction/effect as a discount). ──────────────────────────────────
+  // ── 6.6. TDS — lowers what the goldsmith owes (goldsmith → SHOP, same
+  // direction/effect as a discount). ─────────────────────────────────────────
   if (input.tds_enabled && input.tds_amount && toDecimal(input.tds_amount).gt(0)) {
     entries.push({
-      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-      toAccountId: input.account_id,
+      fromAccountId: input.account_id,
+      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
       itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
       quantity: input.tds_amount,
       remarks: "TDS Adjustment",
     });
   }
 
-  // ── 6.7. TCS — adds to what the goldsmith owes (goldsmith → SHOP). ───────
+  // ── 6.7. TCS — raises what the goldsmith owes (SHOP → goldsmith). ────────
   if (input.tcs_enabled && input.tcs_amount && toDecimal(input.tcs_amount).gt(0)) {
     entries.push({
-      fromAccountId: input.account_id,
-      toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      fromAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
+      toAccountId: input.account_id,
       itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
       quantity: input.tcs_amount,
       remarks: "TCS Adjustment",
@@ -474,18 +484,11 @@ export async function createLabourBill(
   }
 
   // ── 7. Partial Cash Conversions ─────────────────────────────────────────────
-  // Each conversion records that the goldsmith now owes cash instead of pure gold.
-  // The goldsmith sends cash_amount worth of their gold debt to SHOP as a MONEY entry.
+  // The slip moves gold_grams off the goldsmith's pure balance and adds
+  // cash_amount to their cash balance (slipBalancePure −= grams, cashIn += cash).
+  // Same two entries as the stand-alone convertGoldToCash (positive branch).
   for (const conversion of input.cash_conversions) {
-    if (toDecimal(conversion.cash_amount).gt(0)) {
-      entries.push({
-        fromAccountId: input.account_id,
-        toAccountId: SYSTEM_ACCOUNTS.SHOP_ID,
-        itemId: SYSTEM_ITEMS.RUPEE_ITEM_ID,
-        quantity: conversion.cash_amount,
-        remarks: `Cash conversion: ${conversion.gold_grams}g @ ₹${conversion.rate_per_gram}/g`,
-      });
-    }
+    entries.push(...conversionEntries(input.account_id, conversion, "LOWER_PURE"));
   }
 
   // Guard: must have at least one entry

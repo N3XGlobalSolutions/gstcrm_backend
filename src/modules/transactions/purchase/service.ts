@@ -239,7 +239,12 @@ export async function getPurchaseById(input: z.infer<typeof GetByIdSchema>) {
 
 export async function createPurchase(
   input: z.infer<typeof CreatePurchaseSchema>,
-  options?: { existingBillNo?: number; existingEntryNo?: number }
+  options?: {
+    existingBillNo?: number;
+    existingEntryNo?: number;
+    /** Edit: the stored version to reverse inside the same save transaction. */
+    reverseGroupId?: string;
+  }
 ) {
   const allItems = [...input.gold_items, ...input.ornament_items];
   if (allItems.length === 0) {
@@ -292,6 +297,15 @@ export async function createPurchase(
   // Overpayment guard removed by request — bank_amount is no longer capped
   // against the supplier's outstanding balance. A payment larger than what's
   // owed is now accepted and will push the balance negative.
+
+  // The cash amounts exactly as they are POSTED (paise, 2 dp). Round Off below is
+  // worked out from these — not from the unrounded figures — so the bill closes on
+  // a whole rupee. Rounding the unrounded value while posting the rounded charge /
+  // discount left a stray paisa (e.g. ₹29,975.01 instead of ₹29,975.00).
+  const postedChargeCash = toDecimal(totalPurchaseCashVal.toFixed(2));
+  const postedDiscountCash = toDecimal(totalDiscountCash.toFixed(2));
+  const postedTdsCash = toDecimal(toDecimal(input.tds_amount ?? '0').toFixed(2));
+  const postedTcsCash = toDecimal(toDecimal(input.tcs_amount ?? '0').toFixed(2));
 
   // Build entries: supplier → SHOP for goods; SHOP → supplier for cash payment & discount
   const entryInputs = [
@@ -398,16 +412,22 @@ export async function createPurchase(
     // there is no cash remainder to round there.
     ...(() => {
       if (!isCashMode) return [];
-      const tds = input.tds_enabled ? toDecimal(input.tds_amount ?? '0') : toDecimal('0');
-      const tcs = input.tcs_enabled ? toDecimal(input.tcs_amount ?? '0') : toDecimal('0');
-      const billBalance = totalPurchaseCashVal
-        .minus(toDecimal(input.bank_amount || '0'))
-        .minus(totalDiscountCash)
+      // Same amounts the entries above post (each only when it is posted at all).
+      const charge = totalPurchaseCashVal.gt(0) ? postedChargeCash : toDecimal('0');
+      const discount = totalDiscountCash.gt(0) ? postedDiscountCash : toDecimal('0');
+      const tds = input.tds_enabled && postedTdsCash.gt(0) ? postedTdsCash : toDecimal('0');
+      const tcs = input.tcs_enabled && postedTcsCash.gt(0) ? postedTcsCash : toDecimal('0');
+      const bank = toDecimal(input.bank_amount || '0');
+      const billBalance = charge
+        .minus(bank.gt(0) ? bank : toDecimal('0'))
+        .minus(discount)
         .minus(tds)
         .plus(tcs);
-      const roundOff = toDecimal(billBalance.toFixed(0)).minus(billBalance);
+      // Posted at 2 dp; compare the POSTED figure, so a half-paisa remainder is
+      // posted as ₹0.01 rather than silently dropped (or vice versa).
+      const roundOff = toDecimal(toDecimal(billBalance.toFixed(0)).minus(billBalance).toFixed(2));
       // Nothing to post when the bill already lands on a whole rupee.
-      if (roundOff.abs().lt(toDecimal('0.005'))) return [];
+      if (roundOff.isZero()) return [];
       return [
         roundOff.gt(0)
           ? {
@@ -430,18 +450,27 @@ export async function createPurchase(
     })(),
   ];
 
-  const { group, entries } = await createEntryGroup({
-    type: "PURCHASE",
-    accountId: input.account_id,
-    date: input.date,
-    billNo: options?.existingBillNo,
-    entryNo: options?.existingEntryNo,
-    ratePerGram: input.rate_per_gram,
-    remarks: input.remarks,
-    entries: entryInputs,
-  });
+  // One transaction: on an edit the old version's reversal and the new version
+  // commit or roll back together, so a failed save never leaves the bill reversed
+  // with nothing in its place. All checks above run before any write.
+  return db.transaction(async (tx) => {
+    if (options?.reverseGroupId) {
+      await reverseEntryGroup(options.reverseGroupId, tx);
+    }
 
-  return { group, entries };
+    const { group, entries } = await createEntryGroup({
+      type: "PURCHASE",
+      accountId: input.account_id,
+      date: input.date,
+      billNo: options?.existingBillNo,
+      entryNo: options?.existingEntryNo,
+      ratePerGram: input.rate_per_gram,
+      remarks: input.remarks,
+      entries: entryInputs,
+    }, tx);
+
+    return { group, entries };
+  });
 }
 
 /**
@@ -785,12 +814,13 @@ export async function updatePurchase(input: z.infer<typeof UpdatePurchaseSchema>
     }
   }
 
-  // Reverse the original, then create a new one
-  await reverseEntryGroup(input.id);
+  // Reverse the original and create the new version in ONE transaction
+  // (reverseGroupId) — if the new version is refused, the original stays intact.
   const { id: _removed, ...createInput } = input;
   return createPurchase(createInput, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
+    reverseGroupId: input.id,
   });
 }
 

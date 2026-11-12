@@ -506,7 +506,13 @@ export async function createSale(
   input: z.infer<typeof CreateSalesSchema>,
   creator: { id: string; username: string },
   isUpdate: boolean = false,
-  options?: { existingBillNo?: number; existingEntryNo?: number; groupId?: string }
+  options?: {
+    existingBillNo?: number;
+    existingEntryNo?: number;
+    groupId?: string;
+    /** Edit: the stored version to reverse inside the same save transaction. */
+    reverseGroupId?: string;
+  }
 ) {
   // Step 1 — Per-item wastage + pure calculations
   const processedItems = input.items.map((item) => {
@@ -545,6 +551,14 @@ export async function createSale(
   // Steps 5–7 inside one transaction so the SELECT FOR UPDATE lock is held
   // through the insert — prevents two concurrent sales from overselling the same lot.
   return db.transaction(async (tx) => {
+    // Edit: reverse the stored version FIRST, inside this same transaction, so its
+    // stock is back in the shop for the check below and — if anything below is
+    // refused (e.g. "Insufficient stock") — the reversal rolls back with it and
+    // the original bill stays exactly as it was.
+    if (options?.reverseGroupId) {
+      await reverseEntryGroup(options.reverseGroupId, tx);
+    }
+
     // Overpayment guard removed by request — bank_amount is no longer capped
     // against the customer's outstanding balance. A payment larger than what's
     // owed is now accepted and will push the balance negative.
@@ -769,15 +783,27 @@ export async function createSale(
       // CASH mode only — a PURE-mode bill never touches the cash ledger.
       ...(() => {
         if (!isCashMode) return [];
-        const tds = input.tds_enabled ? toDecimal(input.tds_amount ?? "0") : toDecimal("0");
-        const tcs = input.tcs_enabled ? toDecimal(input.tcs_amount ?? "0") : toDecimal("0");
-        const billBalance = pureValueCash
-          .minus(toDecimal(input.bank_amount || "0"))
-          .minus(totalDiscountCash)
+        // Worked out from the amounts exactly as the entries above POST them (2 dp),
+        // not the unrounded figures — otherwise a half-paisa value (charge posted
+        // rounded, round off taken from the unrounded value) leaves the bill 1 paisa
+        // off a whole rupee. Same rule as createPurchase.
+        const at2 = (d: Decimal) => toDecimal(d.toFixed(2));
+        const zero = toDecimal("0");
+        const charge = pureValueCash.gt(0) ? at2(pureValueCash) : zero;
+        const bank = toDecimal(input.bank_amount || "0");
+        const discount = totalDiscountCash.gt(0) ? at2(totalDiscountCash) : zero;
+        const tdsPosted = at2(toDecimal(input.tds_amount ?? "0"));
+        const tcsPosted = at2(toDecimal(input.tcs_amount ?? "0"));
+        const tds = input.tds_enabled && tdsPosted.gt(0) ? tdsPosted : zero;
+        const tcs = input.tcs_enabled && tcsPosted.gt(0) ? tcsPosted : zero;
+        const billBalance = charge
+          .minus(bank.gt(0) ? bank : zero)
+          .minus(discount)
           .minus(tds)
           .plus(tcs);
-        const roundOff = toDecimal(billBalance.toFixed(0)).minus(billBalance);
-        if (roundOff.abs().lt(toDecimal("0.005"))) return [];
+        // Compare the POSTED (2 dp) figure so a half-paisa remainder is never dropped.
+        const roundOff = at2(toDecimal(billBalance.toFixed(0)).minus(billBalance));
+        if (roundOff.isZero()) return [];
         return [
           roundOff.gt(0)
             ? {
@@ -882,12 +908,14 @@ export async function updateSale(
     }
   }
 
-  await reverseEntryGroup(input.id);
+  // Reverse + re-create in ONE transaction (reverseGroupId): a refused save
+  // (e.g. "Insufficient stock") leaves the original bill untouched.
   const { id: _removed, ...createInput } = input;
   return createSale(createInput, creator, true, {
     existingBillNo: originalGroup.bill_no ?? undefined,
     existingEntryNo: originalGroup.entry_no ?? undefined,
     groupId: input.id,
+    reverseGroupId: input.id,
   });
 }
 

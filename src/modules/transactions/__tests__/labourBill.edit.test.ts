@@ -82,7 +82,10 @@ function billInput(
 beforeAll(async () => {
   const url = process.env.DATABASE_URL ?? "";
   // Hard guard: never run against production.
-  if (!url.includes("goldcrm_fullcycle_test")) {
+  // Any throwaway "*_test" database (scripts/fulltest/run.mjs makes one).
+  let dbName = "";
+  try { dbName = new URL(url).pathname.replace(/^\//, ""); } catch { dbName = ""; }
+  if (!/_test$/.test(dbName)) {
     throw new Error(`Refusing to run: DATABASE_URL is not the throwaway test DB (${url.split("@")[1] ?? "?"})`);
   }
   const [item] = await db
