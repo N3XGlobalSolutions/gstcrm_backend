@@ -1,4 +1,5 @@
 import { router, guardedProcedure } from "@/lib/trpc";
+import { billDeleteDisabled } from "@/lib/billDeleteDisabled";
 import { notifyBillEdited } from "@/modules/notifications/service";
 import {
   ListTxSchema,
@@ -18,7 +19,6 @@ import {
   getLabourBillById,
   createLabourBill,
   updateLabourBill,
-  deleteLabourBill,
   createCycle,
   listCycles,
   getCycleDetail,
@@ -36,7 +36,8 @@ export const labourBillRouter = router({
     await notifyBillEdited("Labour Bill", result.group.bill_no, ctx.user!);
     return result;
   }),
-  delete:   guardedProcedure("labourBill", "labourBill", "delete").input(DeleteTxSchema).mutation(async ({ input }) => deleteLabourBill(input)),
+  // Bill delete is turned off (owner, 2026-11-12) — see lib/billDeleteDisabled.
+  delete:   guardedProcedure("labourBill", "labourBill", "delete").input(DeleteTxSchema).mutation(() => billDeleteDisabled()),
 
   // Bill Cycle routes
   createCycle:    guardedProcedure("labourBill", "labourBill", "edit").input(CreateCycleSchema).mutation(async ({ input }) => createCycle(input)),

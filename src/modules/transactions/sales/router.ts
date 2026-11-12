@@ -1,4 +1,5 @@
 import { router, guardedProcedure } from "@/lib/trpc";
+import { billDeleteDisabled } from "@/lib/billDeleteDisabled";
 import { z } from "zod";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
@@ -20,7 +21,6 @@ import {
   getSaleById,
   createSale,
   updateSale,
-  deleteSale,
   updateGSTConversion,
   listGSTHistory,
   undoGSTConversion,
@@ -47,7 +47,8 @@ export const salesRouter = router({
   }),
   create: guardedProcedure("sales", "sales", "edit").input(CreateSalesSchema).mutation(async ({ input, ctx }) => createSale(input, ctx.user!)),
   update: guardedProcedure("sales", "sales", "edit").input(UpdateSalesSchema).mutation(async ({ input, ctx }) => updateSale(input, ctx.user!)),
-  delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(async ({ input, ctx }) => deleteSale(input, ctx.user!)),
+  // Bill delete is turned off (owner, 2026-11-12) — see lib/billDeleteDisabled.
+  delete: guardedProcedure("sales", "sales", "delete").input(DeleteTxSchema).mutation(() => billDeleteDisabled()),
   updateGSTConversion: guardedProcedure("sales", "sales", "edit").input(UpdateGSTConversionSchema).mutation(async ({ input }) => updateGSTConversion(input)),
   undoGSTConversion: guardedProcedure("sales", "sales", "edit").input(GetByIdSchema).mutation(async ({ input }) => undoGSTConversion(input.id)),
   convertGoldToCash: guardedProcedure("sales", "sales", "edit").input(ConvertGoldToCashSchema).mutation(async ({ input }) => convertGoldToCash(input)),
