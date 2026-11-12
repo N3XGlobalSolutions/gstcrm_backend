@@ -13,3 +13,15 @@ export const BILL_DELETE_DISABLED_MESSAGE =
 export function billDeleteDisabled(): never {
   throw new TRPCError({ code: "FORBIDDEN", message: BILL_DELETE_DISABLED_MESSAGE });
 }
+
+/**
+ * Same rule for the Stock page: deleting a lot reversed the whole bill that
+ * created it (Purchase / Labour Bill / Job Work / opening stock), so
+ * `stock.deleteByLot` always refuses too.
+ */
+export const STOCK_LOT_DELETE_DISABLED_MESSAGE =
+  "Deleting stock lots is turned off — a lot belongs to a bill. Open that bill and use Edit to correct it.";
+
+export function stockLotDeleteDisabled(): never {
+  throw new TRPCError({ code: "FORBIDDEN", message: STOCK_LOT_DELETE_DISABLED_MESSAGE });
+}

@@ -9,6 +9,7 @@ import { SYSTEM_ACCOUNTS } from "@/config/constants";
 import { createEntryGroup } from "@/lib/entryBuilder";
 import { getIncomeStatement } from "@/modules/reports/incomeStatement";
 import { TRPCError } from "@trpc/server";
+import { stockLotDeleteDisabled } from "@/lib/billDeleteDisabled";
 import { getMeltingTotals } from "@/modules/melting/service";
 
 // ─── stock.getSummary ─────────────────────────────────────────────────────────
@@ -375,61 +376,14 @@ async function addOpeningStock(input: AddOpeningStockInput) {
 }
 
 // ─── stock.deleteByLot ──────────────────────────────────────────────────────
+// Turned off (owner, 2026-11-12): a lot belongs to a bill (Purchase / Labour
+// Bill / Job Work / opening stock) and deleting it used to reverse that whole
+// bill. Bills are never deleted, so the route stays (an old open screen gets a
+// clear message) but always refuses.
 
 const DeleteByLotSchema = z.object({
   lot_id: z.string().min(1),
 });
-
-async function deleteStockByLot(input: z.infer<typeof DeleteByLotSchema>) {
-  const { entries: entriesTable, entryGroups } = await import("@/db/schema");
-  const { reverseEntryGroup } = await import("@/lib/reversal");
-  const { isNull } = await import("drizzle-orm");
-
-  // Find the entry_group that created this lot
-  const lotEntries = await db
-    .select({ group_id: entriesTable.group_id })
-    .from(entriesTable)
-    .where(eq(entriesTable.lot_id, input.lot_id))
-    .limit(1);
-
-  const firstEntry = lotEntries[0];
-  if (!firstEntry) {
-    throw new TRPCError({ code: "NOT_FOUND", message: "No entries found for this lot" });
-  }
-
-  const groupId = firstEntry.group_id;
-
-  // Check if already reversed/deleted
-  const [group] = await db
-    .select({ is_deleted: entryGroups.is_deleted, reversed_by: entryGroups.reversed_by })
-    .from(entryGroups)
-    .where(eq(entryGroups.id, groupId))
-    .limit(1);
-
-  if (group?.is_deleted || group?.reversed_by) {
-    // Orphaned reversal: group was reversed before lot_id preservation fix.
-    // The reversal entry_group exists but its entries have lot_id=null,
-    // so getLotBalances still shows a positive balance. Fix by backfilling lot_id.
-    const reversalGroupId = group.reversed_by;
-    if (reversalGroupId) {
-      await db.transaction((tx) =>
-        tx
-          .update(entriesTable)
-          .set({ lot_id: input.lot_id })
-          .where(
-            and(
-              eq(entriesTable.group_id, reversalGroupId),
-              isNull(entriesTable.lot_id),
-            ),
-          ),
-      );
-    }
-    return { success: true };
-  }
-
-  await reverseEntryGroup(groupId);
-  return { success: true };
-}
 
 // ─── stock.getProfitLossStock ──────────────────────────────────────────────────
 
@@ -806,5 +760,5 @@ export const stockRouter = router({
     .mutation(async ({ input }) => addOpeningStock(input)),
   deleteByLot: guardedProcedure("stock", "stock", "edit")
     .input(DeleteByLotSchema)
-    .mutation(async ({ input }) => deleteStockByLot(input)),
+    .mutation(() => stockLotDeleteDisabled()),
 });
